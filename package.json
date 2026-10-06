@@ -1,10 +1,12 @@
 {
   "name": "jworks-cloud",
   "private": true,
-  "version": "10.2.0",
-  "devDependencies": {"wrangler": "^4.0.0"},
+  "version": "10.2.8",
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
   "scripts": {
-    "deploy": "wrangler deploy",
+    "deploy": "uv run pywrangler sync && rm -rf .wrangler && npx wrangler deploy --config wrangler.jsonc",
     "d1:migrate": "wrangler d1 migrations apply jworks-db --remote"
   }
 }

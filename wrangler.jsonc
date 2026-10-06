@@ -7,20 +7,14 @@
   "assets": {
     "directory": "./public/",
     "binding": "ASSETS",
-    "run_worker_first": true
+    "run_worker_first": ["/api/*"]
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "jworks-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "e714c771-188d-4411-88ee-46d218d2f539",
       "migrations_dir": "migrations"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "FILES",
-      "bucket_name": "jworks-files"
     }
   ]
 }
