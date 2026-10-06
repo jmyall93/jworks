@@ -72,7 +72,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.2.10-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='10.2.12-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -125,6 +125,78 @@ def logout():
     sid=request.cookies.get('jworks_session');
     if sid:q('DELETE FROM sessions WHERE id=?',sid)
     r=jsonify(ok=True);r.delete_cookie('jworks_session',path='/');return r
+
+
+
+def openrouter_key():
+    try:return str(env().OPENROUTER_API_KEY).strip()
+    except Exception:return ''
+
+def provider_error(raw,status=None):
+    """Return a useful provider error without ever exposing credentials."""
+    msg='OpenRouter rejected the request.'
+    try:
+        data=raw if isinstance(raw,dict) else json.loads(str(raw))
+        er=data.get('error',data) if isinstance(data,dict) else {}
+        if isinstance(er,dict): msg=str(er.get('message') or er.get('code') or msg)
+        elif er: msg=str(er)
+    except Exception:
+        t=str(raw).strip()
+        if t: msg=t[:500]
+    return msg[:500]
+
+def openrouter_chat(messages,model='openrouter/free',temperature=0.2):
+    key=openrouter_key()
+    if not key: raise RuntimeError('OPENROUTER_API_KEY is not configured in Cloudflare.')
+    from js import fetch, Headers
+    payload=json.dumps({'model':model,'messages':messages,'temperature':temperature})
+    headers=Headers.new();headers.set('Authorization','Bearer '+key);headers.set('Content-Type','application/json');headers.set('HTTP-Referer',request.host_url.rstrip('/'));headers.set('X-Title','JWorks')
+    resp=run_sync(fetch('https://openrouter.ai/api/v1/chat/completions',{'method':'POST','headers':headers,'body':payload}))
+    txt=str(run_sync(resp.text()))
+    try: raw=json.loads(txt)
+    except Exception: raw={'raw':txt[:500]}
+    if not resp.ok: raise RuntimeError(f'OpenRouter HTTP {resp.status}: {provider_error(raw,resp.status)}')
+    try:
+        content=raw['choices'][0]['message']['content']
+        if not content: raise ValueError('empty response')
+        return str(content),raw
+    except Exception:
+        raise RuntimeError('OpenRouter returned a response JWorks could not read.')
+
+@app.get('/api/ai-status')
+def ai_status():
+    u,e=require_user()
+    if e:return e
+    configured=bool(openrouter_key())
+    return jsonify(enabled=configured,configured=configured,provider='OpenRouter',model='openrouter/free',message=('OpenRouter secret is configured.' if configured else 'OPENROUTER_API_KEY is not configured in Cloudflare.'))
+
+@app.get('/api/ai-config')
+def ai_config():
+    u,e=require_user()
+    if e:return e
+    configured=bool(openrouter_key())
+    return jsonify(provider='OpenRouter',model='openrouter/free',configured=configured,secret_location='Cloudflare Worker secret')
+
+@app.post('/api/ai-test')
+def ai_test():
+    u,e=require_user(True)
+    if e:return e
+    if not openrouter_key():return jsonify(error='OPENROUTER_API_KEY is not configured in Cloudflare.'),503
+    try:
+        answer,raw=openrouter_chat([{'role':'user','content':'Reply with exactly: JWorks AI connection successful'}],model='openrouter/free',temperature=0)
+        return jsonify(ok=True,message='OpenRouter connection successful.',model=str(raw.get('model','openrouter/free')),response=answer[:160])
+    except Exception as exc:return jsonify(error=str(exc)),502
+
+@app.get('/api/system-status')
+def system_status():
+    u,e=require_user()
+    if e:return e
+    try:
+        projects=int(val(first('SELECT COUNT(*) AS n FROM projects WHERE owner_id=?',str(u.id)),'n',0) or 0)
+        tasks=int(val(first('SELECT COUNT(*) AS n FROM tasks WHERE owner_id=?',str(u.id)),'n',0) or 0)
+        attachments=int(val(first('SELECT COUNT(*) AS n FROM attachments WHERE owner_id=?',str(u.id)),'n',0) or 0)
+        return jsonify(database='D1 connected',database_size=0,upload_size=0,projects=projects,tasks=tasks,attachments=attachments,backup='Cloudflare D1 managed storage')
+    except Exception as exc:return jsonify(error='Could not load system status: '+str(exc)),500
 
 STATE_TABLES=['projects','tasks','checklist','milestones','attachments','activity','phases','costs','issues','baselines','inbox','notifications','meetings','changes','report_snapshots','saved_views','automation_rules','report_revisions','recurring_projects','decisions','procurement','field_reports','project_templates','approvals','scopes_of_work']
 @app.get('/api/state')
@@ -261,20 +333,19 @@ def sow_ai():
     if e:return e
     d=body();prompt=str(d.get('prompt','')).strip();pid=str(d.get('project_id',''));p=first('SELECT name,description,asset,contractor,start_date,end_date FROM projects WHERE id=? AND owner_id=?',pid,str(u.id))
     if not p:return jsonify(error='Project not found'),404
-    try:key=str(env().OPENROUTER_API_KEY)
-    except Exception:key=''
+    key=openrouter_key()
     if not key:return jsonify(error='AI is not configured yet. Add OPENROUTER_API_KEY as a Cloudflare Worker secret, or use Manual/Hybrid mode.'),503
     try:
-        from js import fetch, Headers
         system='You are a construction and maintenance scope-of-work drafting assistant. Produce contractor-bid-ready content. Never invent site facts. Mark unknowns as [TO CONFIRM]. Return ONLY JSON: {"title":"...","sections":[{"title":"...","body":"..."}],"review_flags":["..."]}. Include project overview, existing conditions, detailed scope, contractor and owner responsibilities, access/work restrictions, safety/permits/compliance, testing/commissioning, submittals, schedule/milestones, cleanup/restoration, warranty, bid/pricing requirements, exclusions/clarifications.'
         context=f"Project: {p.name}\nDescription: {p.description}\nAsset: {p.asset}\nStart: {p.start_date}\nTarget: {p.end_date}\nUser instructions: {prompt}"
-        payload=json.dumps({'model':'openrouter/auto','messages':[{'role':'system','content':system},{'role':'user','content':context}],'temperature':0.2})
-        headers=Headers.new();headers.set('Authorization','Bearer '+key);headers.set('Content-Type','application/json')
-        resp=run_sync(fetch('https://openrouter.ai/api/v1/chat/completions',{'method':'POST','headers':headers,'body':payload}))
-        txt=run_sync(resp.text()); raw=json.loads(str(txt))
-        if not resp.ok:return jsonify(error='AI provider error',detail=raw),502
-        content=raw['choices'][0]['message']['content'].strip();content=content.replace('```json','').replace('```','').strip();out=json.loads(content);return jsonify(out)
-    except Exception as exc:return jsonify(error='AI draft failed',detail=str(exc)),502
+        content,raw=openrouter_chat([{'role':'system','content':system},{'role':'user','content':context}],model='openrouter/free',temperature=0.2)
+        content=content.strip().replace('```json','').replace('```','').strip()
+        out=json.loads(content)
+        if not isinstance(out.get('sections'),list):raise ValueError('AI response did not contain SOW sections.')
+        return jsonify(out)
+    except json.JSONDecodeError:
+        return jsonify(error='OpenRouter responded, but the SOW was not valid structured JSON. Try Generate again.'),502
+    except Exception as exc:return jsonify(error=str(exc)),502
 
 @app.route('/api/<path:path>',methods=['GET','POST','PUT','PATCH','DELETE'])
 def pending(path):return jsonify(error='This feature is still being converted to the JWorks cloud backend.',route=path),503
