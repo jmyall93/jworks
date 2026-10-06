@@ -47,7 +47,7 @@ def verify_password(p,stored):
 def current_user():
     sid=request.cookies.get('jworks_session');
     if not sid:return None
-    r=first("SELECT u.id,u.username,s.csrf,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=?",sid)
+    r=first("SELECT u.id,u.username,s.csrf,s.expires_at,m.company_id,m.role,c.name AS company_name,c.login_code,c.logo_data_url,c.report_footer,c.status AS company_status FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN company_memberships m ON m.user_id=u.id AND m.status='active' LEFT JOIN companies c ON c.id=m.company_id WHERE s.id=? ORDER BY CASE m.role WHEN 'platform_owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END LIMIT 1",sid)
     if not r:return None
     if str(val(r,'expires_at',''))<now(): q('DELETE FROM sessions WHERE id=?',sid); return None
     return r
@@ -57,7 +57,8 @@ def require_user(csrf=False):
     if csrf and request.headers.get('X-CSRF-Token','')!=str(val(u,'csrf','')):return None,(jsonify(error='Security token expired. Refresh and try again.'),403)
     return u,None
 def session_response(u,sid,csrf):
-    r=jsonify(authenticated=True,username=str(u.username),csrf=csrf)
+    m=first("SELECT m.company_id,m.role,c.name AS company_name,c.login_code,c.logo_data_url,c.report_footer FROM company_memberships m JOIN companies c ON c.id=m.company_id WHERE m.user_id=? AND m.status='active' ORDER BY CASE m.role WHEN 'platform_owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END LIMIT 1",str(getattr(u,'id','')))
+    r=jsonify(authenticated=True,username=str(u.username),csrf=csrf,company_id=str(val(m,'company_id','')),company_name=str(val(m,'company_name','')),company_code=str(val(m,'login_code','')),role=str(val(m,'role','user')),company_logo=str(val(m,'logo_data_url','')),report_footer=str(val(m,'report_footer','Generated with JWorks')))
     r.set_cookie('jworks_session',sid,max_age=604800,httponly=True,secure=True,samesite='Lax',path='/')
     return r
 
@@ -65,14 +66,14 @@ def create_session(user_id,username):
     sid=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(24); exp=(datetime.now(timezone.utc)+timedelta(days=7)).replace(microsecond=0).isoformat().replace('+00:00','Z')
     q('INSERT INTO sessions(id,user_id,csrf,expires_at,created_at) VALUES(?,?,?,?,?)',sid,user_id,csrf,exp,now())
     class U: pass
-    u=U();u.username=username
+    u=U();u.username=username;u.id=user_id
     return session_response(u,sid,csrf)
 
 @app.get('/api/health')
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.3.5-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='11.0-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -80,7 +81,7 @@ def setup_needed():
 @app.get('/api/session')
 def session_status():
     u=current_user()
-    return jsonify(authenticated=bool(u),username=(str(val(u,'username','')) if u else None),csrf=(str(val(u,'csrf','')) if u else None))
+    return jsonify(authenticated=bool(u),username=(str(val(u,'username','')) if u else None),csrf=(str(val(u,'csrf','')) if u else None),company_id=(str(val(u,'company_id','')) if u else None),company_name=(str(val(u,'company_name','')) if u else None),company_code=(str(val(u,'login_code','')) if u else None),role=(str(val(u,'role','')) if u else None),company_logo=(str(val(u,'logo_data_url','')) if u else None),report_footer=(str(val(u,'report_footer','Generated with JWorks')) if u else None))
 @app.post('/api/setup')
 def setup():
     # First-run administrator creation. Keep each stage explicit so Cloudflare/D1
@@ -103,6 +104,9 @@ def setup():
     i=uid()
     try:
         q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',i,username,password_hash,now())
+        q("INSERT OR IGNORE INTO companies(id,login_code,name,status,plan,seat_limit,report_footer,created_at) VALUES(?,?,?,?,?,?,?,?)",'jworks-owner-company','JWORKS-OWNER','My JWorks Workspace','active','owner',999,'Generated with JWorks',now())
+        q("INSERT INTO company_memberships(company_id,user_id,role,status,created_at) VALUES(?,?,?,?,?)",'jworks-owner-company',i,'platform_owner','active',now())
+        q("INSERT OR IGNORE INTO subscriptions(id,company_id,status,plan,seat_limit,starts_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",'jworks-owner-subscription','jworks-owner-company','active','owner',999,now(),now(),now())
     except Exception as e:
         return jsonify(error='Could not save the administrator to D1',stage='insert-user',detail=str(e)),500
 
@@ -117,9 +121,35 @@ def setup():
         return jsonify(error='Administrator could not be signed in; setup was rolled back',stage='create-session',detail=str(e)),500
 @app.post('/api/login')
 def login():
-    d=body();r=first('SELECT id,username,password_hash FROM users WHERE username=?',str(d.get('username','')).strip())
-    if not r or not verify_password(str(d.get('password','')),str(val(r,'password_hash',''))):return jsonify(error='Invalid username or password'),401
+    d=body(); code=str(d.get('company_id','')).strip().upper(); username=str(d.get('username','')).strip()
+    if not code:return jsonify(error='Company ID is required'),400
+    r=first("SELECT u.id,u.username,u.password_hash,c.status,m.status AS member_status FROM users u JOIN company_memberships m ON m.user_id=u.id JOIN companies c ON c.id=m.company_id WHERE UPPER(c.login_code)=? AND u.username=?",code,username)
+    if not r or str(val(r,'status','')) not in ('active','trial') or str(val(r,'member_status',''))!='active' or not verify_password(str(d.get('password','')),str(val(r,'password_hash',''))):
+        return jsonify(error='Invalid Company ID, username or password'),401
     return create_session(str(val(r,'id','')),str(val(r,'username','')))
+
+@app.post('/api/trial')
+def trial_signup():
+    d=body(); company=str(d.get('company_name','')).strip(); username=str(d.get('username','')).strip(); password=str(d.get('password',''))
+    if len(company)<2 or len(username)<3 or not password:return jsonify(error='Company name, username and password are required'),400
+    cid=uid(); user_id=uid(); code=('JW-'+secrets.token_hex(4)).upper(); ts=now(); trial=(datetime.now(timezone.utc)+timedelta(days=14)).replace(microsecond=0).isoformat().replace('+00:00','Z')
+    try:
+        q('INSERT INTO companies(id,login_code,name,status,plan,seat_limit,trial_ends_at,report_footer,created_at) VALUES(?,?,?,?,?,?,?,?,?)',cid,code,company,'trial','trial',5,trial,'Generated with JWorks',ts)
+        q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',user_id,username,hash_password(password),ts)
+        q('INSERT INTO company_memberships(company_id,user_id,role,status,created_at) VALUES(?,?,?,?,?)',cid,user_id,'admin','active',ts)
+        q('INSERT INTO subscriptions(id,company_id,status,plan,seat_limit,starts_at,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',uid(),cid,'trial','trial',5,ts,trial,ts,ts)
+        return jsonify(ok=True,company_id=code,trial_ends_at=trial)
+    except Exception as exc:return jsonify(error='Could not create trial workspace: '+str(exc)),400
+
+@app.post('/api/forgot-password')
+def forgot_password():
+    d=body(); code=str(d.get('company_id','')).strip().upper(); username=str(d.get('username','')).strip()
+    r=first("SELECT u.id,c.id AS company_id FROM users u JOIN company_memberships m ON m.user_id=u.id JOIN companies c ON c.id=m.company_id WHERE UPPER(c.login_code)=? AND u.username=?",code,username)
+    # Always return the same response to avoid account enumeration. Email delivery is intentionally not faked.
+    if r:
+        token=secrets.token_urlsafe(32); q('INSERT INTO password_reset_tokens(id,company_id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?)',uid(),str(val(r,'company_id','')),str(val(r,'id','')),hashlib.sha256(token.encode()).hexdigest(),(datetime.now(timezone.utc)+timedelta(minutes=30)).replace(microsecond=0).isoformat().replace('+00:00','Z'),now())
+    return jsonify(ok=True,email_configured=False,message='Password reset request recorded. Email delivery is not configured yet; contact your company administrator.')
+
 @app.post('/api/logout')
 def logout():
     sid=request.cookies.get('jworks_session');
@@ -241,14 +271,23 @@ def system_status():
         return jsonify(database='D1 connected',database_size=0,upload_size=0,projects=projects,tasks=tasks,attachments=attachments,backup='Cloudflare D1 managed storage')
     except Exception as exc:return jsonify(error='Could not load system status: '+str(exc)),500
 
+def company_user_ids(u):
+    cid=user_company(u)
+    if not cid:return [str(val(u,'id',''))]
+    return [str(x.get('user_id')) for x in rows("SELECT user_id FROM company_memberships WHERE company_id=? AND status='active'",cid)]
+def company_owns(u,table,idv):
+    ids=company_user_ids(u)
+    if not ids:return False
+    marks=','.join(['?']*len(ids)); return bool(first(f'SELECT id FROM {table} WHERE id=? AND owner_id IN ({marks})',idv,*ids))
+
 STATE_TABLES=['projects','tasks','checklist','milestones','attachments','activity','phases','costs','issues','baselines','inbox','notifications','meetings','changes','report_snapshots','saved_views','automation_rules','report_revisions','recurring_projects','decisions','procurement','field_reports','project_templates','approvals','scopes_of_work']
 @app.get('/api/state')
 def state():
     u,e=require_user();
     if e:return e
-    out={}
+    out={}; ids=company_user_ids(u); marks=','.join(['?']*len(ids))
     for t in STATE_TABLES:
-        try:out[t]=rows(f'SELECT * FROM {t} WHERE owner_id=?',str(u.id))
+        try:out[t]=rows(f'SELECT * FROM {t} WHERE owner_id IN ({marks})',*ids)
         except Exception:out[t]=[]
     return jsonify(out)
 
@@ -276,12 +315,18 @@ def project_create():
 def project_patch(idv):
     u,e=require_user(True);
     if e:return e
-    patch_named('projects',idv,str(u.id),PROJECT_FIELDS,body());return jsonify(ok=True)
+    
+    if not company_owns(u,'projects',idv):return jsonify(error='Project not found'),404
+    d=body(); use=[f for f in PROJECT_FIELDS if f in d]
+    if use:q('UPDATE projects SET '+','.join(f'{f}=?' for f in use)+' WHERE id=?',*[d[f] for f in use],idv)
+    return jsonify(ok=True)
 @app.delete('/api/projects/<idv>')
 def project_delete(idv):
     u,e=require_user(True);
     if e:return e
-    q('DELETE FROM projects WHERE id=? AND owner_id=?',idv,str(u.id));return jsonify(ok=True)
+    
+    if not company_owns(u,'projects',idv):return jsonify(error='Project not found'),404
+    q('DELETE FROM projects WHERE id=?',idv);return jsonify(ok=True)
 @app.post('/api/tasks')
 def task_create():
     u,e=require_user(True);
@@ -291,12 +336,18 @@ def task_create():
 def task_patch(idv):
     u,e=require_user(True);
     if e:return e
-    patch_named('tasks',idv,str(u.id),TASK_FIELDS,body());return jsonify(ok=True)
+    
+    if not company_owns(u,'tasks',idv):return jsonify(error='Task not found'),404
+    d=body(); use=[f for f in TASK_FIELDS if f in d]
+    if use:q('UPDATE tasks SET '+','.join(f'{f}=?' for f in use)+' WHERE id=?',*[d[f] for f in use],idv)
+    return jsonify(ok=True)
 @app.delete('/api/tasks/<idv>')
 def task_delete(idv):
     u,e=require_user(True);
     if e:return e
-    q('DELETE FROM tasks WHERE id=? AND owner_id=?',idv,str(u.id));return jsonify(ok=True)
+    
+    if not company_owns(u,'tasks',idv):return jsonify(error='Task not found'),404
+    q('DELETE FROM tasks WHERE id=?',idv);return jsonify(ok=True)
 
 SIMPLE={
 'checklist':('checklist',['task_id','title','done','sort_order']), 'milestones':('milestones',['project_id','title','due_date','done']),
@@ -374,7 +425,7 @@ def default_sow_sections(p):
 def sow_ai():
     u,e=require_user(True);
     if e:return e
-    d=body();prompt=str(d.get('prompt','')).strip();pid=str(d.get('project_id',''));p=first('SELECT name,description,asset,contractor,start_date,end_date FROM projects WHERE id=? AND owner_id=?',pid,str(u.id))
+    d=body();prompt=str(d.get('prompt','')).strip();pid=str(d.get('project_id',''));p=first('SELECT name,description,asset,contractor,start_date,end_date FROM projects WHERE id=?',pid) if company_owns(u,'projects',pid) else None
     if not p:return jsonify(error='Project not found'),404
     key=openrouter_key()
     if not key:return jsonify(error='AI is not configured yet. Add OPENROUTER_API_KEY as a Cloudflare Worker secret, or use Manual/Hybrid mode.'),503
@@ -389,6 +440,81 @@ def sow_ai():
     except json.JSONDecodeError:
         return jsonify(error='OpenRouter responded, but the SOW was not valid structured JSON. Try Generate again.'),502
     except Exception as exc:return jsonify(error=str(exc)),502
+
+
+def user_company(u): return str(val(u,'company_id',''))
+def user_role(u): return str(val(u,'role','user'))
+def platform_owner(u): return user_role(u)=='platform_owner'
+def company_admin(u): return user_role(u) in ('platform_owner','admin')
+
+@app.get('/api/company')
+def company_get():
+    u,e=require_user();
+    if e:return e
+    c=first('SELECT id,login_code,name,status,plan,seat_limit,trial_ends_at,logo_data_url,address,report_footer,created_at FROM companies WHERE id=?',user_company(u))
+    return jsonify(company={k:val(c,k,'') for k in ['id','login_code','name','status','plan','seat_limit','trial_ends_at','logo_data_url','address','report_footer','created_at']},role=user_role(u))
+
+@app.patch('/api/company')
+def company_patch():
+    u,e=require_user(True);
+    if e:return e
+    if not company_admin(u):return jsonify(error='Company administrator access required'),403
+    d=body(); fields=[]; vals=[]
+    for f in ['name','logo_data_url','address','report_footer']:
+        if f in d: fields.append(f+'=?'); vals.append(str(d[f]))
+    if fields:q('UPDATE companies SET '+','.join(fields)+' WHERE id=?',*vals,user_company(u))
+    return jsonify(ok=True)
+
+@app.get('/api/company-users')
+def company_users():
+    u,e=require_user();
+    if e:return e
+    if not company_admin(u):return jsonify(error='Company administrator access required'),403
+    return jsonify(users=rows("SELECT u.id,u.username,m.role,m.status,u.created_at FROM users u JOIN company_memberships m ON m.user_id=u.id WHERE m.company_id=? ORDER BY u.username",user_company(u)))
+
+@app.post('/api/company-users')
+def company_user_create():
+    u,e=require_user(True);
+    if e:return e
+    if not company_admin(u):return jsonify(error='Company administrator access required'),403
+    cid=user_company(u); c=first('SELECT seat_limit FROM companies WHERE id=?',cid); used=first("SELECT COUNT(*) AS n FROM company_memberships WHERE company_id=? AND status='active'",cid)
+    if int(val(used,'n',0))>=int(val(c,'seat_limit',0)):return jsonify(error='No available licenses. Increase the company seat limit before adding another active user.'),409
+    d=body(); username=str(d.get('username','')).strip(); password=str(d.get('password','')); role=str(d.get('role','user'))
+    if role not in ('admin','manager','user','viewer'):role='user'
+    if len(username)<3 or not password:return jsonify(error='Username and password are required'),400
+    i=uid()
+    try:q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',i,username,hash_password(password),now());q('INSERT INTO company_memberships(company_id,user_id,role,status,created_at) VALUES(?,?,?,?,?)',cid,i,role,'active',now())
+    except Exception as exc:return jsonify(error='Could not create user: '+str(exc)),400
+    return jsonify(id=i)
+
+@app.get('/api/platform/companies')
+def platform_companies():
+    u,e=require_user();
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    return jsonify(companies=rows("SELECT c.id,c.login_code,c.name,c.status,c.plan,c.seat_limit,c.trial_ends_at,c.created_at,(SELECT COUNT(*) FROM company_memberships m WHERE m.company_id=c.id AND m.status='active') AS seats_used,(SELECT COUNT(*) FROM projects p JOIN company_memberships mm ON mm.user_id=p.owner_id WHERE mm.company_id=c.id) AS projects FROM companies c ORDER BY c.created_at DESC"))
+
+@app.post('/api/platform/companies')
+def platform_company_create():
+    u,e=require_user(True);
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    d=body(); name=str(d.get('name','')).strip(); seats=max(1,int(d.get('seat_limit',5) or 5)); plan=str(d.get('plan','professional')); code=str(d.get('login_code','')).strip().upper() or ('JW-'+secrets.token_hex(4)).upper()
+    if not name:return jsonify(error='Company name is required'),400
+    cid=uid(); ts=now(); q('INSERT INTO companies(id,login_code,name,status,plan,seat_limit,report_footer,created_at) VALUES(?,?,?,?,?,?,?,?)',cid,code,name,'active',plan,seats,'Generated with JWorks',ts);q('INSERT INTO subscriptions(id,company_id,status,plan,seat_limit,starts_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',uid(),cid,'active',plan,seats,ts,ts,ts)
+    return jsonify(id=cid,company_id=code)
+
+@app.patch('/api/platform/companies/<idv>')
+def platform_company_patch(idv):
+    u,e=require_user(True);
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    d=body(); fields=[];vals=[]
+    for f in ['name','status','plan','seat_limit','logo_data_url','address','report_footer']:
+        if f in d:fields.append(f+'=?');vals.append(d[f])
+    if fields:q('UPDATE companies SET '+','.join(fields)+' WHERE id=?',*vals,idv)
+    if 'seat_limit' in d or 'plan' in d or 'status' in d:q('UPDATE subscriptions SET seat_limit=COALESCE(?,seat_limit),plan=COALESCE(?,plan),status=COALESCE(?,status),updated_at=? WHERE company_id=?',d.get('seat_limit'),d.get('plan'),d.get('status'),now(),idv)
+    return jsonify(ok=True)
 
 @app.route('/api/<path:path>',methods=['GET','POST','PUT','PATCH','DELETE'])
 def pending(path):return jsonify(error='This feature is still being converted to the JWorks cloud backend.',route=path),503
