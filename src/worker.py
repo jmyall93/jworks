@@ -808,6 +808,54 @@ def public_inquiry():
     except Exception: pass
     return jsonify(ok=True,inquiry_number=number,email_sent=sent)
 
+
+
+# ===== JWorks V12.1 Growth + Implementation Center =====
+@app.get('/api/implementations')
+def implementations_get_v121():
+    u,e=require_user()
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    return jsonify(items=rows('SELECT * FROM implementations ORDER BY updated_at DESC'))
+
+@app.post('/api/implementations')
+def implementations_post_v121():
+    u,e=require_user(True)
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    d=body(); name=str(d.get('company_name','')).strip()
+    if not name:return jsonify(error='Company name is required'),400
+    ident=uid(); ts=now(); source=str(d.get('source_platform','excel'))
+    q('INSERT INTO implementations(id,company_id,company_name,source_platform,status,progress,owner_notes,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',ident,str(d.get('company_id','')),name,source,'discovery',0,'','{}',ts,ts)
+    steps=[('discovery','Discovery'),('configuration','Workspace Configuration'),('migration','Data Migration'),('users','User Setup'),('validation','Validation'),('training','Training'),('golive','Go-Live'),('review','30-Day Review')]
+    for i,(k,t) in enumerate(steps):q('INSERT INTO implementation_steps(id,implementation_id,step_key,title,status,sort_order,updated_at) VALUES(?,?,?,?,?,?,?)',uid(),ident,k,t,'pending',i,ts)
+    return jsonify(ok=True,id=ident)
+
+@app.get('/api/implementations/<idv>')
+def implementation_detail_v121(idv):
+    u,e=require_user()
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    x=first('SELECT * FROM implementations WHERE id=?',idv)
+    if not x:return jsonify(error='Implementation not found'),404
+    return jsonify(item=x,steps=rows('SELECT * FROM implementation_steps WHERE implementation_id=? ORDER BY sort_order',idv),profiles=rows('SELECT * FROM migration_profiles WHERE implementation_id=? ORDER BY updated_at DESC',idv))
+
+@app.patch('/api/implementations/<idv>/step/<stepid>')
+def implementation_step_patch_v121(idv,stepid):
+    u,e=require_user(True)
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    d=body(); st=str(d.get('status','pending')); q('UPDATE implementation_steps SET status=?,notes=?,updated_at=? WHERE id=? AND implementation_id=?',st,str(d.get('notes','')),now(),stepid,idv)
+    allsteps=rows('SELECT status FROM implementation_steps WHERE implementation_id=?',idv); done=sum(1 for x in allsteps if x.get('status')=='done'); prog=round(done/max(1,len(allsteps))*100)
+    q('UPDATE implementations SET progress=?,updated_at=? WHERE id=?',prog,now(),idv);return jsonify(ok=True,progress=prog)
+
+@app.post('/api/migration-profile')
+def migration_profile_post_v121():
+    u,e=require_user(True)
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    d=body(); ident=uid(); ts=now(); q('INSERT INTO migration_profiles(id,implementation_id,source_platform,name,mapping_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',ident,str(d.get('implementation_id','')),str(d.get('source_platform','excel')),str(d.get('name','Saved mapping')),json.dumps(d.get('mapping') or {}),ts,ts);return jsonify(ok=True,id=ident)
+
 Default=wsgi.entrypoint(app)
 
 
