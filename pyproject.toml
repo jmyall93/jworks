@@ -1,0 +1,8 @@
+[project]
+name = "jworks-cloud"
+version = "10.2.0"
+requires-python = ">=3.12"
+dependencies = ["flask"]
+
+[dependency-groups]
+dev = ["workers-py", "workers-runtime-sdk"]

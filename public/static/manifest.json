@@ -1,0 +1,9 @@
+{
+  "name": "JWorks",
+  "short_name": "JWorks",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#080d17",
+  "theme_color": "#080d17",
+  "description": "JWorks personal project and work command center"
+}
