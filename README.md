@@ -18,7 +18,7 @@ Cloudflare Workers + D1 edition, based on JWorks 10.1.4 Fresh Start.
 1. In Cloudflare D1 > jworks-db > Console, run `migrations/0002_cloud_auth_sow.sql` once.
 2. Upload/commit this release to the existing GitHub `jworks` repository.
 3. Cloudflare should redeploy automatically. Deploy command remains `uv run pywrangler deploy`.
-4. Open JWorks. Because the database is fresh, the login screen should change to **Create administrator**. Create the first account with a password of at least 12 characters.
+4. Open JWorks. Because the database is fresh, the login screen should change to **Create administrator**. Create the first account with any non-empty password.
 
 ## AI Scope generation
 Manual and hybrid SOW editing work without an AI key. To generate AI drafts, add a Cloudflare Worker secret named `OPENROUTER_API_KEY` containing your OpenRouter API key. Never commit the key to GitHub.

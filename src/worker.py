@@ -23,12 +23,26 @@ def rows(sql,*args):
     r=q(sql,*args); x=py(r.results)
     return [dict(py(i)) for i in x]
 def body(): return request.get_json(silent=True) or {}
+# Portable salted password KDF for Cloudflare Python Workers/Pyodide.
+# hashlib.pbkdf2_hmac is not available in the deployed runtime, so use a
+# deliberately repeated SHA-256 construction with a per-password random salt.
+# The stored format is versioned so the KDF can be upgraded later.
+_PASSWORD_ROUNDS=120000
+def _portable_kdf(password,salt,rounds=_PASSWORD_ROUNDS):
+    pwd=password.encode('utf-8'); salt_bytes=bytes.fromhex(salt)
+    digest=hashlib.sha256(salt_bytes+b'\x00'+pwd).digest()
+    for i in range(1,rounds):
+        digest=hashlib.sha256(digest+salt_bytes+pwd+i.to_bytes(4,'big')).digest()
+    return digest.hex()
 def hash_password(p,salt=None):
-    salt=salt or secrets.token_hex(16); dk=hashlib.pbkdf2_hmac('sha256',p.encode(),bytes.fromhex(salt),210000)
-    return 'pbkdf2_sha256$210000$'+salt+'$'+dk.hex()
+    salt=salt or secrets.token_hex(16)
+    return f'jworks_sha256_v1${_PASSWORD_ROUNDS}${salt}${_portable_kdf(p,salt,_PASSWORD_ROUNDS)}'
 def verify_password(p,stored):
     try:
-        _,n,salt,digest=stored.split('$',3); got=hashlib.pbkdf2_hmac('sha256',p.encode(),bytes.fromhex(salt),int(n)).hex(); return hmac.compare_digest(got,digest)
+        scheme,n,salt,digest=stored.split('$',3)
+        if scheme!='jworks_sha256_v1': return False
+        got=_portable_kdf(p,salt,int(n))
+        return hmac.compare_digest(got,digest)
     except Exception:return False
 def current_user():
     sid=request.cookies.get('jworks_session');
@@ -58,7 +72,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.2.9-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='10.2.10-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -79,7 +93,7 @@ def setup():
 
     d=body(); username=str(d.get('username','')).strip(); password=str(d.get('password',''))
     if len(username)<3:return jsonify(error='Username must be at least 3 characters'),400
-    if len(password)<12:return jsonify(error='Password must be at least 12 characters'),400
+    if not password:return jsonify(error='Password is required'),400
 
     try:
         password_hash=hash_password(password)
