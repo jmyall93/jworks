@@ -16,11 +16,6 @@
       "database_id": "e714c771-188d-4411-88ee-46d218d2f539",
       "migrations_dir": "migrations"
     }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "FILES",
-      "bucket_name": "jworks-files"
-    }
+ 
   ]
 }
