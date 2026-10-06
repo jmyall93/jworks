@@ -2,7 +2,8 @@ from flask import Flask, Response, jsonify, request
 from pyodide.ffi import run_sync
 from workers import wsgi, fetch as worker_fetch, env as worker_env
 from datetime import datetime, timedelta, timezone
-import hashlib, hmac, secrets, uuid, json
+import hashlib, hmac, secrets, uuid, json, io, zipfile, re
+import xml.etree.ElementTree as ET
 
 app=Flask(__name__)
 def env(): return request.environ['workers.env']
@@ -710,5 +711,77 @@ def report_templates_delete(idv):
     u,e=require_user(True);
     if e:return e
     q('DELETE FROM custom_report_templates WHERE id=? AND owner_id=?',idv,str(val(u,'id','')));return jsonify(ok=True)
+
+
+def _xlsx_rows(blob):
+    """Small dependency-free XLSX reader for the JWorks import templates."""
+    z=zipfile.ZipFile(io.BytesIO(blob)); ns={'m':'http://schemas.openxmlformats.org/spreadsheetml/2006/main','r':'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
+    shared=[]
+    if 'xl/sharedStrings.xml' in z.namelist():
+        root=ET.fromstring(z.read('xl/sharedStrings.xml'))
+        for si in root.findall('m:si',ns): shared.append(''.join(t.text or '' for t in si.iter('{%s}t'%ns['m'])))
+    root=ET.fromstring(z.read('xl/worksheets/sheet1.xml')); out=[]
+    for row in root.findall('.//m:sheetData/m:row',ns):
+        vals={}
+        for c in row.findall('m:c',ns):
+            ref=c.attrib.get('r','A1'); col=re.match(r'[A-Z]+',ref).group(0); typ=c.attrib.get('t'); v=c.find('m:v',ns); inline=c.find('m:is',ns)
+            value=''
+            if typ=='inlineStr' and inline is not None:value=''.join(t.text or '' for t in inline.iter('{%s}t'%ns['m']))
+            elif v is not None:
+                value=v.text or ''
+                if typ=='s': value=shared[int(value)] if value else ''
+            vals[col]=value
+        out.append(vals)
+    def ci(col):
+        n=0
+        for ch in col:n=n*26+ord(ch)-64
+        return n-1
+    if not out:return []
+    headers={k:str(v).strip() for k,v in out[0].items()}; result=[]
+    for r in out[1:]:
+        item={headers.get(k,k):str(v).strip() for k,v in r.items() if headers.get(k)}
+        if any(item.values()):result.append(item)
+    return result
+
+def _norm_status(v,kind):
+    x=str(v or '').strip().lower().replace(' ','_')
+    if kind=='projects': return {'active':'active','planned':'planned','planning':'planned','complete':'complete','completed':'complete','on_hold':'on_hold','on hold':'on_hold'}.get(x,x or 'active')
+    return {'to_do':'todo','todo':'todo','not_started':'todo','in_progress':'doing','in progress':'doing','doing':'doing','done':'done','complete':'done','completed':'done'}.get(x,x or 'todo')
+
+@app.post('/api/import-xlsx/preview')
+def import_xlsx_preview():
+    u,e=require_user(True)
+    if e:return e
+    kind=str(request.form.get('kind','')); f=request.files.get('file')
+    if kind not in ('projects','tasks') or not f:return jsonify(error='Choose a valid JWorks Excel template.'),400
+    try: raw=_xlsx_rows(f.read())
+    except Exception as exc:return jsonify(error='Could not read this .xlsx file. Use the current JWorks import template. '+str(exc)),400
+    out=[]; codes={str(x.get('project_code') or '').lower():x['id'] for x in rows('SELECT id,project_code FROM projects WHERE owner_id IN ('+','.join(['?']*len(company_user_ids(u)))+')',*company_user_ids(u)) if x.get('project_code')}
+    for idx,r in enumerate(raw,2):
+        if kind=='projects':
+            x={'row':idx,'name':r.get('Project Name',''),'project_code':r.get('Project Code',''),'description':r.get('Description',''),'status':_norm_status(r.get('Status'),kind),'priority':r.get('Priority',''),'start_date':r.get('Start Date',''),'end_date':r.get('Target Date',''),'estimated_cost':r.get('Budget','') or 0,'notes':r.get('Notes',''),'errors':[]}
+            if not x['name']:x['errors'].append('Project Name is required')
+            if x['project_code'] and x['project_code'].lower() in codes:x['errors'].append('Project Code already exists')
+        else:
+            code=r.get('Project Code',''); x={'row':idx,'name':r.get('Task Name',''),'project_code':code,'description':r.get('Description',''),'status':_norm_status(r.get('Status'),kind),'priority':str(r.get('Priority','medium') or 'medium').lower(),'start_date':r.get('Start Date',''),'due_date':r.get('Due Date',''),'notes':r.get('Notes',''),'project_id':codes.get(code.lower()) if code else None,'errors':[]}
+            if not x['name']:x['errors'].append('Task Name is required')
+            if code and not x['project_id']:x['errors'].append('Project Code does not match an existing project')
+        out.append(x)
+    return jsonify(kind=kind,rows=out,valid_count=sum(not x['errors'] for x in out),error_count=sum(bool(x['errors']) for x in out))
+
+@app.post('/api/import-xlsx/commit')
+def import_xlsx_commit():
+    u,e=require_user(True)
+    if e:return e
+    d=body();kind=d.get('kind');items=d.get('rows') or []
+    if kind not in ('projects','tasks'):return jsonify(error='Invalid import type'),400
+    count=0
+    for x in items:
+        if x.get('errors'):continue
+        if kind=='projects':
+            data={k:x.get(k) for k in ['name','project_code','description','status','start_date','end_date','estimated_cost','notes']}; data['created_at']=now(); insert_named('projects',str(u.id),PROJECT_FIELDS,data);count+=1
+        else:
+            data={k:x.get(k) for k in ['project_id','name','start_date','due_date','status','priority','notes']};data['created_at']=now();insert_named('tasks',str(u.id),TASK_FIELDS,data);count+=1
+    return jsonify(count=count)
 
 Default=wsgi.entrypoint(app)
