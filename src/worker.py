@@ -419,7 +419,7 @@ def sow_patch(idv):
     u,e=require_user(True);
     if e:return e
     d=body(); fields=[];vals=[]
-    for f in ['title','status','source_mode','ai_prompt']:
+    for f in ['title','status','source_mode','ai_prompt','document_project_code','revision_label','revision_date','revision_history_json']:
         if f in d:fields.append(f+'=?');vals.append(d[f])
     if 'sections' in d:fields.append('content_json=?');vals.append(json.dumps(d['sections']))
     if fields:fields.append('updated_at=?');vals.append(now());q('UPDATE scopes_of_work SET '+','.join(fields)+' WHERE id=? AND owner_id=?',*vals,idv,str(u.id))
@@ -455,7 +455,7 @@ def sow_ai():
     d=body();prompt=str(d.get('prompt','')).strip();pid=str(d.get('project_id',''));p=first('SELECT name,description,asset,contractor,start_date,end_date FROM projects WHERE id=?',pid) if company_owns(u,'projects',pid) else None
     if not p:return jsonify(error='Project not found'),404
     try:
-        system='You are a construction and maintenance scope-of-work drafting assistant. Produce contractor-bid-ready content. Never invent site facts. Mark unknowns as [TO CONFIRM]. Return ONLY JSON: {"title":"...","sections":[{"title":"...","body":"..."}],"review_flags":["..."]}. Include project overview, existing conditions, detailed scope, contractor and owner responsibilities, access/work restrictions, safety/permits/compliance, testing/commissioning, submittals, schedule/milestones, cleanup/restoration, warranty, bid/pricing requirements, exclusions/clarifications.'
+        system='You are a construction and maintenance scope-of-work drafting assistant. Produce contractor-bid-ready content. Never invent site facts. Mark unknowns as [TO CONFIRM] during drafting only; these markers are internal drafting flags and must be resolved before an approved-for-bid or issued contractor document is produced. Return ONLY JSON: {"title":"...","sections":[{"title":"...","body":"..."}],"review_flags":["..."]}. Include project overview, existing conditions, detailed scope, contractor and owner responsibilities, access/work restrictions, safety/permits/compliance, testing/commissioning, submittals, schedule/milestones, cleanup/restoration, warranty, bid/pricing requirements, exclusions/clarifications.'
         context=f"Project: {p.name}\nDescription: {p.description}\nAsset: {p.asset}\nStart: {p.start_date}\nTarget: {p.end_date}\nUser instructions: {prompt}"
         content,raw=openrouter_chat([{'role':'system','content':system},{'role':'user','content':context}],model='openrouter/free',temperature=0.2)
         content=content.strip().replace('```json','').replace('```','').strip()
