@@ -1,13 +1,13 @@
 {
   "name": "jworks-cloud",
   "private": true,
-  "version": "11.2.1",
+  "version": "11.2.2",
   "devDependencies": {
     "wrangler": "^4.0.0"
   },
   "scripts": {
-    "deploy": "npm run deploy:ai && uv run pywrangler sync && rm -rf .wrangler && npx wrangler d1 migrations apply jworks-db --remote --config wrangler.jsonc && npx wrangler deploy --config wrangler.jsonc",
+    "deploy": "uv run pywrangler sync && rm -rf .wrangler && npx wrangler d1 migrations apply jworks-db --remote --config wrangler.jsonc && npx wrangler deploy --config wrangler.jsonc",
     "d1:migrate": "wrangler d1 migrations apply jworks-db --remote",
-    "deploy:ai": "env -u WRANGLER_CI_OVERRIDE_NAME npx wrangler deploy --config wrangler-ai.jsonc"
+    "deploy:ai": "npx wrangler deploy --config ai-worker/wrangler.jsonc"
   }
 }

@@ -28,3 +28,11 @@ Open a scope and choose **Print / Save PDF**. JWorks opens a clean Letter-size c
 
 ## Current migration boundary
 10.2.1 converts authentication plus the most important project/task and SOW workflows. Some older advanced endpoints (templates, report revisions, baselines, full AI Project Builder, attachments, etc.) still return a clear cloud-migration message until converted. Keep the 10.1.4 Windows build as the fallback copy while cloud migration continues.
+
+## V11.2.2 Cloudflare two-Worker deployment
+The repository now contains two independently deployed Workers:
+
+- Root: `jworks` — deploy command `npm run deploy`
+- `ai-worker/`: `jworks-ai` — deploy command `npm run deploy:ai`
+
+Do not make the root `jworks` build deploy `jworks-ai`; Cloudflare Workers Builds ties each Git-connected build to its configured Worker name. Connect a second Cloudflare Worker named `jworks-ai` to this same repository and give that Worker the `OPENROUTER_API_KEY` production secret. The main Worker uses its existing `AI` service binding to call `jworks-ai`.
