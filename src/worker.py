@@ -13,6 +13,12 @@ def first(sql,*args): return run_sync(env().DB.prepare(sql).bind(*args).first())
 def py(v):
     try: return v.to_py()
     except Exception: return v
+def val(r,key,default=None):
+    if r is None:return default
+    try:return py(getattr(r,key))
+    except Exception:
+        try:return py(r[key])
+        except Exception:return default
 def rows(sql,*args):
     r=q(sql,*args); x=py(r.results)
     return [dict(py(i)) for i in x]
@@ -29,12 +35,12 @@ def current_user():
     if not sid:return None
     r=first("SELECT u.id,u.username,s.csrf,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=?",sid)
     if not r:return None
-    if str(r.expires_at)<now(): q('DELETE FROM sessions WHERE id=?',sid); return None
+    if str(val(r,'expires_at',''))<now(): q('DELETE FROM sessions WHERE id=?',sid); return None
     return r
 def require_user(csrf=False):
     u=current_user()
     if not u:return None,(jsonify(error='Authentication required'),401)
-    if csrf and request.headers.get('X-CSRF-Token','')!=str(u.csrf):return None,(jsonify(error='Security token expired. Refresh and try again.'),403)
+    if csrf and request.headers.get('X-CSRF-Token','')!=str(val(u,'csrf','')):return None,(jsonify(error='Security token expired. Refresh and try again.'),403)
     return u,None
 def session_response(u,sid,csrf):
     r=jsonify(authenticated=True,username=str(u.username),csrf=csrf)
@@ -52,18 +58,18 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.2.1-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='10.2.2-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
-    try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(not r or int(r.n)==0))
+    try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
     except Exception:return jsonify(needed=True,error='D1 migrations are not complete'),503
 @app.get('/api/session')
 def session_status():
     u=current_user()
-    return jsonify(authenticated=bool(u),username=(str(u.username) if u else None),csrf=(str(u.csrf) if u else None))
+    return jsonify(authenticated=bool(u),username=(str(val(u,'username','')) if u else None),csrf=(str(val(u,'csrf','')) if u else None))
 @app.post('/api/setup')
 def setup():
-    if first('SELECT COUNT(*) AS n FROM users').n: return jsonify(error='Administrator already exists'),409
+    if first('SELECT id FROM users LIMIT 1') is not None: return jsonify(error='Administrator already exists'),409
     d=body(); username=str(d.get('username','')).strip(); password=str(d.get('password',''))
     if len(username)<3:return jsonify(error='Username must be at least 3 characters'),400
     if len(password)<12:return jsonify(error='Password must be at least 12 characters'),400
@@ -71,8 +77,8 @@ def setup():
 @app.post('/api/login')
 def login():
     d=body();r=first('SELECT id,username,password_hash FROM users WHERE username=?',str(d.get('username','')).strip())
-    if not r or not verify_password(str(d.get('password','')),str(r.password_hash)):return jsonify(error='Invalid username or password'),401
-    return create_session(str(r.id),str(r.username))
+    if not r or not verify_password(str(d.get('password','')),str(val(r,'password_hash',''))):return jsonify(error='Invalid username or password'),401
+    return create_session(str(val(r,'id','')),str(val(r,'username','')))
 @app.post('/api/logout')
 def logout():
     sid=request.cookies.get('jworks_session');

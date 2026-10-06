@@ -283,7 +283,7 @@ const projectDetailV10Base=projectDetail;projectDetail=function(){projectDetailV
 // JWorks 10.1.1: AI launcher is inside the authenticated shell and is always visible there.
 const jworksNavActive=navActive;navActive=function(){jworksNavActive();document.querySelectorAll('#nav details').forEach(d=>{if(d.querySelector('button.active'))d.open=true})};
 
-// ===== JWorks 10.2.1 Cloud · Scope of Work Builder =====
+// ===== JWorks 10.2.2 Cloud · Scope of Work Builder =====
 function sowSections(x){try{return Array.isArray(x.content_json)?x.content_json:JSON.parse(x.content_json||'[]')}catch(e){return []}}
 function sowForProject(pid){return (S.scopes_of_work||[]).filter(x=>x.project_id===pid).sort((a,b)=>(b.updated_at||'').localeCompare(a.updated_at||''))}
 function sowHome(pid){let list=sowForProject(pid);$('projectPane').innerHTML=`<div class="panel"><div class="between"><div><h2>Scope of Work</h2><div class="small muted">Build contractor-ready bid scopes manually, with AI, or using both.</div></div><div class="actions">${btn('+ Manual Scope',`newSow('${pid}','manual')`)}${btn('✦ AI Draft',`newSow('${pid}','ai')`,'primary')}</div></div>${list.map(x=>`<div class="listrow"><div class="click" onclick="editSow('${x.id}')"><b>${esc(x.title)}</b><div class="small muted">${esc(x.status)} · Rev ${Number(x.revision||0)} · ${esc(x.source_mode||'manual')} · updated ${new Date(x.updated_at).toLocaleString()}</div></div><div class="actions">${btn('Open',`editSow('${x.id}')`)}${btn('Print / PDF',`printSow('${x.id}')`)}${btn('Delete',`deleteSow('${x.id}')`,'danger')}</div></div>`).join('')||'<div class="empty">No scopes yet. Start manually or have AI prepare the first draft.</div>'}</div>`}

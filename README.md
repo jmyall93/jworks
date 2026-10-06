@@ -1,4 +1,4 @@
-# JWorks 10.2.1 Cloud
+# JWorks 10.2.2 Cloud
 
 Cloudflare Workers + D1 edition, based on JWorks 10.1.4 Fresh Start.
 
