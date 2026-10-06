@@ -73,7 +73,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='11.0-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='11.1-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -240,7 +240,22 @@ def ai_config():
         secret_location='Cloudflare Worker secret',transport='workers.fetch(url, method, headers, body)',
         secret_present=state['secret_present'],secret_nonempty=state['secret_nonempty'],
         secret_is_text=state['secret_is_text'],authorization_constructed=configured,
-        diagnostic_version='10.3.5')
+        diagnostic_version='11.1')
+
+def openrouter_key_validation(key,diag):
+    """Validate the configured credential independently of chat completions."""
+    try:
+        headers={'Authorization':'Bearer '+key,'Accept':'application/json'}
+        resp=run_sync(worker_fetch('https://openrouter.ai/api/v1/key',method='GET',headers=headers))
+        txt=str(run_sync(resp.text()))
+        diag['key_endpoint_reached']=True
+        diag['key_endpoint_status']=int(resp.status)
+        diag['key_authenticated']=bool(resp.ok)
+        if not resp.ok: diag['key_error']=provider_error(txt,resp.status)
+        return bool(resp.ok)
+    except Exception as exc:
+        diag['key_endpoint_reached']=False;diag['key_authenticated']=False;diag['key_error']=str(exc)[:300]
+        return False
 
 @app.post('/api/ai-test')
 def ai_test():
@@ -249,8 +264,9 @@ def ai_test():
     key,state=openrouter_secret_state()
     diag={'secret_present':state['secret_present'],'secret_nonempty':state['secret_nonempty'],
           'secret_is_text':state['secret_is_text'],'authorization_constructed':bool(key),
-          'transport':'workers.fetch(url, method, headers, body)','diagnostic_version':'10.3.5'}
+          'transport':'workers.fetch(url, method, headers, body)','diagnostic_version':'11.1'}
     if not key:return jsonify(error='OPENROUTER_API_KEY is not available to the running Worker.',diagnostics=diag),503
+    openrouter_key_validation(key,diag)
     try:
         answer,raw=openrouter_chat([{'role':'user','content':'Reply with exactly: JWorks AI connection successful'}],model='openrouter/free',temperature=0,diagnostics=diag)
         diag['openrouter_reached']=True;diag['openrouter_authenticated']=True
@@ -487,6 +503,24 @@ def company_user_create():
     except Exception as exc:return jsonify(error='Could not create user: '+str(exc)),400
     return jsonify(id=i)
 
+@app.patch('/api/company-users/<idv>')
+def company_user_update(idv):
+    u,e=require_user(True)
+    if e:return e
+    if not company_admin(u):return jsonify(error='Company administrator access required'),403
+    cid=user_company(u); d=body(); m=first('SELECT role,status FROM company_memberships WHERE company_id=? AND user_id=?',cid,idv)
+    if not m:return jsonify(error='User not found in this company'),404
+    role=str(d.get('role',val(m,'role','user'))); status=str(d.get('status',val(m,'status','active')))
+    if role not in ('admin','manager','user','viewer'):return jsonify(error='Invalid role'),400
+    if status not in ('active','disabled'):return jsonify(error='Invalid status'),400
+    if status=='active' and str(val(m,'status',''))!='active':
+        c=first('SELECT seat_limit FROM companies WHERE id=?',cid); used=first("SELECT COUNT(*) AS n FROM company_memberships WHERE company_id=? AND status='active'",cid)
+        if int(val(used,'n',0))>=int(val(c,'seat_limit',0)):return jsonify(error='No available licenses.'),409
+    q('UPDATE company_memberships SET role=?,status=? WHERE company_id=? AND user_id=?',role,status,cid,idv)
+    if d.get('new_password'):
+        q('UPDATE users SET password_hash=? WHERE id=?',hash_password(str(d['new_password'])),idv);q('DELETE FROM sessions WHERE user_id=?',idv)
+    return jsonify(ok=True)
+
 @app.get('/api/platform/companies')
 def platform_companies():
     u,e=require_user();
@@ -496,13 +530,67 @@ def platform_companies():
 
 @app.post('/api/platform/companies')
 def platform_company_create():
-    u,e=require_user(True);
+    u,e=require_user(True)
     if e:return e
     if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
     d=body(); name=str(d.get('name','')).strip(); seats=max(1,int(d.get('seat_limit',5) or 5)); plan=str(d.get('plan','professional')); code=str(d.get('login_code','')).strip().upper() or ('JW-'+secrets.token_hex(4)).upper()
+    admin_username=str(d.get('admin_username','')).strip(); admin_password=str(d.get('admin_password',''))
     if not name:return jsonify(error='Company name is required'),400
-    cid=uid(); ts=now(); q('INSERT INTO companies(id,login_code,name,status,plan,seat_limit,report_footer,created_at) VALUES(?,?,?,?,?,?,?,?)',cid,code,name,'active',plan,seats,'Generated with JWorks',ts);q('INSERT INTO subscriptions(id,company_id,status,plan,seat_limit,starts_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',uid(),cid,'active',plan,seats,ts,ts,ts)
-    return jsonify(id=cid,company_id=code)
+    if len(admin_username)<3 or not admin_password:return jsonify(error='Initial administrator username and password are required'),400
+    cid=uid(); aid=uid(); ts=now()
+    try:
+        q('INSERT INTO companies(id,login_code,name,status,plan,seat_limit,report_footer,created_at) VALUES(?,?,?,?,?,?,?,?)',cid,code,name,'active',plan,seats,'Generated with JWorks',ts)
+        q('INSERT INTO subscriptions(id,company_id,status,plan,seat_limit,starts_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',uid(),cid,'active',plan,seats,ts,ts,ts)
+        q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',aid,admin_username,hash_password(admin_password),ts)
+        q('INSERT INTO company_memberships(company_id,user_id,role,status,created_at) VALUES(?,?,?,?,?)',cid,aid,'admin','active',ts)
+    except Exception as exc:
+        try:q('DELETE FROM companies WHERE id=?',cid)
+        except Exception:pass
+        try:q('DELETE FROM users WHERE id=?',aid)
+        except Exception:pass
+        return jsonify(error='Could not create company and administrator: '+str(exc)),400
+    return jsonify(id=cid,company_id=code,admin_username=admin_username)
+
+@app.get('/api/platform/companies/<idv>/users')
+def platform_company_users(idv):
+    u,e=require_user()
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    return jsonify(users=rows("SELECT u.id,u.username,m.role,m.status,u.created_at FROM users u JOIN company_memberships m ON m.user_id=u.id WHERE m.company_id=? ORDER BY u.username",idv))
+
+@app.post('/api/platform/companies/<idv>/users')
+def platform_company_user_create(idv):
+    u,e=require_user(True)
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    c=first('SELECT seat_limit FROM companies WHERE id=?',idv)
+    if not c:return jsonify(error='Company not found'),404
+    used=first("SELECT COUNT(*) AS n FROM company_memberships WHERE company_id=? AND status='active'",idv)
+    if int(val(used,'n',0))>=int(val(c,'seat_limit',0)):return jsonify(error='No available licenses. Increase the company seat limit first.'),409
+    d=body(); username=str(d.get('username','')).strip(); password=str(d.get('password','')); role=str(d.get('role','user'))
+    if role not in ('admin','manager','user','viewer'):role='user'
+    if len(username)<3 or not password:return jsonify(error='Username and password are required'),400
+    i=uid()
+    try:q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',i,username,hash_password(password),now());q('INSERT INTO company_memberships(company_id,user_id,role,status,created_at) VALUES(?,?,?,?,?)',idv,i,role,'active',now())
+    except Exception as exc:return jsonify(error='Could not create user: '+str(exc)),400
+    return jsonify(id=i)
+
+@app.patch('/api/platform/companies/<idv>/users/<uidv>')
+def platform_company_user_update(idv,uidv):
+    u,e=require_user(True)
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    m=first('SELECT role,status FROM company_memberships WHERE company_id=? AND user_id=?',idv,uidv)
+    if not m:return jsonify(error='User not found in this company'),404
+    d=body(); role=str(d.get('role',val(m,'role','user'))); status=str(d.get('status',val(m,'status','active')))
+    if role not in ('admin','manager','user','viewer') or status not in ('active','disabled'):return jsonify(error='Invalid role or status'),400
+    if status=='active' and str(val(m,'status',''))!='active':
+        c=first('SELECT seat_limit FROM companies WHERE id=?',idv); used=first("SELECT COUNT(*) AS n FROM company_memberships WHERE company_id=? AND status='active'",idv)
+        if int(val(used,'n',0))>=int(val(c,'seat_limit',0)):return jsonify(error='No available licenses.'),409
+    q('UPDATE company_memberships SET role=?,status=? WHERE company_id=? AND user_id=?',role,status,idv,uidv)
+    if d.get('new_password'):
+        q('UPDATE users SET password_hash=? WHERE id=?',hash_password(str(d['new_password'])),uidv);q('DELETE FROM sessions WHERE user_id=?',uidv)
+    return jsonify(ok=True)
 
 @app.patch('/api/platform/companies/<idv>')
 def platform_company_patch(idv):
