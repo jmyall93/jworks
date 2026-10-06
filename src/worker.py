@@ -4,6 +4,7 @@ from workers import wsgi, fetch as worker_fetch, env as worker_env
 from datetime import datetime, timedelta, timezone
 import hashlib, hmac, secrets, uuid, json
 from pyodide.ffi import to_js
+from js import Request as JSRequest, Headers as JSHeaders, Object as JSObject
 
 app=Flask(__name__)
 def env(): return request.environ['workers.env']
@@ -162,19 +163,30 @@ def provider_error(raw,status=None):
         if t: msg=t[:500]
     return msg[:500]
 
-def openrouter_chat(messages,model='openrouter/free',temperature=0.2):
+def build_openrouter_request(messages,model='openrouter/free',temperature=0.2):
+    # 10.3.4: construct a real Workers Request object first, then fetch that Request.
+    # This lets us verify Authorization exists on the exact object sent on the wire.
     key=openrouter_key()
     if not key: raise RuntimeError('OPENROUTER_API_KEY is not configured in Cloudflare.')
     payload=json.dumps({'model':model,'messages':messages,'temperature':temperature})
-    # 10.3.2: use Cloudflare Python Workers native outbound fetch API directly.
-    # This avoids the Pyodide -> JavaScript RequestInit bridge that dropped Authorization.
-    headers={
-        'Authorization':'Bearer '+key,
-        'Content-Type':'application/json',
-        'HTTP-Referer':request.host_url.rstrip('/'),
-        'X-Title':'JWorks'
-    }
-    resp=run_sync(worker_fetch('https://openrouter.ai/api/v1/chat/completions', method='POST', headers=headers, body=payload))
+    headers=JSHeaders.new()
+    headers.set('authorization','Bearer '+key)
+    headers.set('content-type','application/json')
+    headers.set('x-title','JWorks')
+    init=to_js({'method':'POST','headers':headers,'body':payload,'redirect':'manual'},dict_converter=JSObject.fromEntries)
+    req=JSRequest.new('https://openrouter.ai/api/v1/chat/completions',init)
+    attached=bool(req.headers.get('authorization'))
+    return req,attached
+
+def openrouter_chat(messages,model='openrouter/free',temperature=0.2,diagnostics=None):
+    req,attached=build_openrouter_request(messages,model,temperature)
+    if diagnostics is not None:
+        diagnostics['request_object_created']=True
+        diagnostics['authorization_on_request_object']=attached
+        diagnostics['transport']='Workers Request -> workers.fetch(Request)'
+    if not attached:
+        raise RuntimeError('JWorks could not attach Authorization to the outbound Request object.')
+    resp=run_sync(worker_fetch(req))
     txt=str(run_sync(resp.text()))
     try: raw=json.loads(txt)
     except Exception: raw={'raw':txt[:500]}
@@ -199,10 +211,10 @@ def ai_config():
     if e:return e
     key,state=openrouter_secret_state(); configured=bool(key)
     return jsonify(provider='OpenRouter',model='openrouter/free',configured=configured,
-        secret_location='Cloudflare Worker secret',transport='workers.fetch',
+        secret_location='Cloudflare Worker secret',transport='Workers Request -> workers.fetch(Request)',
         secret_present=state['secret_present'],secret_nonempty=state['secret_nonempty'],
         secret_is_text=state['secret_is_text'],authorization_constructed=configured,
-        diagnostic_version='10.3.3')
+        diagnostic_version='10.3.4')
 
 @app.post('/api/ai-test')
 def ai_test():
@@ -211,10 +223,10 @@ def ai_test():
     key,state=openrouter_secret_state()
     diag={'secret_present':state['secret_present'],'secret_nonempty':state['secret_nonempty'],
           'secret_is_text':state['secret_is_text'],'authorization_constructed':bool(key),
-          'transport':'workers.fetch','diagnostic_version':'10.3.3'}
+          'transport':'Workers Request -> workers.fetch(Request)','diagnostic_version':'10.3.4'}
     if not key:return jsonify(error='OPENROUTER_API_KEY is not available to the running Worker.',diagnostics=diag),503
     try:
-        answer,raw=openrouter_chat([{'role':'user','content':'Reply with exactly: JWorks AI connection successful'}],model='openrouter/free',temperature=0)
+        answer,raw=openrouter_chat([{'role':'user','content':'Reply with exactly: JWorks AI connection successful'}],model='openrouter/free',temperature=0,diagnostics=diag)
         diag['openrouter_reached']=True;diag['openrouter_authenticated']=True
         return jsonify(ok=True,message='OpenRouter connection successful.',model=str(raw.get('model','openrouter/free')),response=answer[:160],diagnostics=diag)
     except Exception as exc:
