@@ -41,7 +41,7 @@ function openRouterHeaders(key) {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
     'HTTP-Referer': 'https://jworks.jeffmyall6.workers.dev',
-    'X-Title': 'JWorks'
+    'X-OpenRouter-Title': 'JWorks'
   };
 }
 
@@ -49,6 +49,66 @@ async function parseProviderResponse(response) {
   const text = await response.text();
   try { return text ? JSON.parse(text) : {}; }
   catch { return { message: text || 'OpenRouter returned an unreadable response.' }; }
+}
+
+
+async function authProbe(key) {
+  const url = 'https://openrouter.ai/api/v1/key';
+  const attempts = [];
+
+  async function run(name, makeRequest) {
+    try {
+      const response = await makeRequest();
+      const data = await parseProviderResponse(response);
+      attempts.push({
+        name,
+        status: response.status,
+        ok: response.ok,
+        redirected: response.redirected,
+        response_url: response.url,
+        error: response.ok ? '' : providerMessage(data)
+      });
+      return response.ok;
+    } catch (error) {
+      attempts.push({name, status: 0, ok: false, redirected: false, response_url: '', error: String(error).slice(0, 240)});
+      return false;
+    }
+  }
+
+  if (await run('literal-headers', () => fetch(url, {
+    method: 'GET',
+    redirect: 'manual',
+    headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' }
+  }))) return {authenticated: true, working_method: 'literal-headers', attempts};
+
+  if (await run('headers-object', () => {
+    const h = new Headers();
+    h.set('Authorization', `Bearer ${key}`);
+    h.set('Accept', 'application/json');
+    return fetch(url, {method: 'GET', redirect: 'manual', headers: h});
+  })) return {authenticated: true, working_method: 'headers-object', attempts};
+
+  if (await run('request-object', () => {
+    const req = new Request(url, {
+      method: 'GET', redirect: 'manual',
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' }
+    });
+    return fetch(req);
+  })) return {authenticated: true, working_method: 'request-object', attempts};
+
+  if (await run('lowercase-authorization', () => fetch(url, {
+    method: 'GET', redirect: 'manual',
+    headers: { authorization: `Bearer ${key}`, accept: 'application/json' }
+  }))) return {authenticated: true, working_method: 'lowercase-authorization', attempts};
+
+  return {authenticated: false, working_method: '', attempts};
+}
+
+async function openRouterFetch(url, init, key) {
+  // Prefer the standard literal-header request. If the runtime behaves differently,
+  // the diagnostic probe tells us exactly which construction authenticated.
+  const headers = {...(init.headers || {}), Authorization: `Bearer ${key}`};
+  return fetch(url, {...init, headers, redirect: 'manual'});
 }
 
 export default {
@@ -62,6 +122,7 @@ export default {
     const headers = openRouterHeaders(key);
 
     if (url.pathname === '/diagnostics') {
+      const probe = key ? await authProbe(key) : {authenticated:false,working_method:'',attempts:[]};
       return json({
         ok: Boolean(key),
         ai_worker_reached: true,
@@ -72,6 +133,9 @@ export default {
         key_length: key.length,
         key_normalized: true,
         outbound_header_style: 'plain-object-literal',
+        auth_probe_authenticated: probe.authenticated,
+        auth_probe_working_method: probe.working_method,
+        auth_probe_attempts: probe.attempts,
         transport: 'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter'
       });
     }
@@ -85,23 +149,19 @@ export default {
     }
 
     if (url.pathname === '/key-test') {
-      const response = await fetch('https://openrouter.ai/api/v1/key', {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${key}`,
-          'Accept': 'application/json'
-        }
-      });
-      const data = await parseProviderResponse(response);
+      const probe = await authProbe(key);
+      const last = probe.attempts[probe.attempts.length - 1] || {};
       return json({
-        ok: response.ok,
-        openrouter_reached: true,
-        authenticated: response.ok,
-        status: response.status,
+        ok: probe.authenticated,
+        openrouter_reached: probe.attempts.length > 0,
+        authenticated: probe.authenticated,
+        status: probe.authenticated ? 200 : Number(last.status || 0),
         provider: 'OpenRouter',
         key_format_openrouter: /^sk-or-/i.test(key),
-        outbound_header_style: 'plain-object-literal',
-        error: response.ok ? '' : providerMessage(data)
+        key_length: key.length,
+        working_method: probe.working_method,
+        attempts: probe.attempts,
+        error: probe.authenticated ? '' : String(last.error || 'All OpenRouter authentication probes failed.')
       });
     }
 
@@ -113,17 +173,16 @@ export default {
       };
 
       // This is deliberately the same native fetch shape shown in OpenRouter docs.
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const response = await openRouterFetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${key}`,
           'Content-Type': 'application/json',
           'Accept': 'application/json',
           'HTTP-Referer': 'https://jworks.jeffmyall6.workers.dev',
-          'X-Title': 'JWorks'
+          'X-OpenRouter-Title': 'JWorks'
         },
         body: JSON.stringify(payload)
-      });
+      }, key);
 
       const data = await parseProviderResponse(response);
       if (!response.ok) {

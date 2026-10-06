@@ -247,12 +247,14 @@ def ai_config():
     return jsonify(provider='OpenRouter',model='openrouter/free',configured=bool(d.get('ai_worker_secret_nonempty')),
         secret_location='jworks-ai Cloudflare Worker secret',transport=d.get('transport','JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter'),
         ai_worker_secret_present=bool(d.get('ai_worker_secret_present')),ai_worker_secret_nonempty=bool(d.get('ai_worker_secret_nonempty')),
-        authorization_header_present=bool(d.get('authorization_header_present')),diagnostic_version='11.2.6')
+        authorization_header_present=bool(d.get('authorization_header_present')),diagnostic_version='11.2.7')
 
 def openrouter_key_validation(diag):
     try:
         raw=ai_service_call('/key-test',{},diag)
         diag['key_endpoint_reached']=bool(raw.get('openrouter_reached',True)); diag['key_endpoint_status']=int(raw.get('status',200)); diag['key_authenticated']=bool(raw.get('authenticated',False))
+        diag['key_probe_working_method']=str(raw.get('working_method',''))
+        diag['key_probe_attempts']=raw.get('attempts') if isinstance(raw.get('attempts'),list) else []
         if not diag['key_authenticated']:diag['key_error']=str(raw.get('error','Authentication failed'))[:300]
         return diag['key_authenticated']
     except Exception as exc:
@@ -262,13 +264,16 @@ def openrouter_key_validation(diag):
 def ai_test():
     u,e=require_user(True)
     if e:return e
-    diag={'transport':'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter','diagnostic_version':'11.2.6'}
+    diag={'transport':'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter','diagnostic_version':'11.2.7'}
     try:
         d=ai_service_call('/diagnostics',{},diag)
         diag['ai_worker_reached']=bool(d.get('ai_worker_reached',True));diag['ai_worker_secret_present']=bool(d.get('ai_worker_secret_present'));diag['ai_worker_secret_nonempty']=bool(d.get('ai_worker_secret_nonempty'));diag['authorization_header_present']=bool(d.get('authorization_header_present'))
         diag['key_format_openrouter']=bool(d.get('key_format_openrouter'))
         diag['key_length']=int(d.get('key_length',0) or 0)
         diag['outbound_header_style']=str(d.get('outbound_header_style',''))
+        diag['auth_probe_authenticated']=bool(d.get('auth_probe_authenticated'))
+        diag['auth_probe_working_method']=str(d.get('auth_probe_working_method',''))
+        diag['auth_probe_attempts']=d.get('auth_probe_attempts') if isinstance(d.get('auth_probe_attempts'),list) else []
     except Exception as exc:
         return jsonify(error=str(exc),diagnostics=diag),503
     if not diag['ai_worker_secret_nonempty']:
