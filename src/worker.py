@@ -785,3 +785,22 @@ def import_xlsx_commit():
     return jsonify(count=count)
 
 Default=wsgi.entrypoint(app)
+
+
+# ===== JWorks V12 support =====
+@app.get('/api/support-tickets')
+def support_tickets_get():
+    u=auth_user()
+    if not u:return jsonify(error='Unauthorized'),401
+    return jsonify(tickets=rows('SELECT id,ticket_number,subject,category,priority,status,created_at FROM support_tickets WHERE company_id=? ORDER BY created_at DESC LIMIT 100',user_company(u)))
+
+@app.post('/api/support-tickets')
+def support_tickets_post():
+    u=auth_user()
+    if not u:return jsonify(error='Unauthorized'),401
+    if not csrf_ok(u):return jsonify(error='Invalid CSRF token'),403
+    d=body(); subject=str(d.get('subject','')).strip(); desc=str(d.get('description','')).strip()
+    if not subject or not desc:return jsonify(error='Subject and description are required'),400
+    ts=now(); ident=uid(); number='JW-'+datetime.now(timezone.utc).strftime('%y%m%d')+'-'+ident[:5].upper()
+    q('INSERT INTO support_tickets(id,ticket_number,company_id,user_id,subject,category,priority,description,diagnostics,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',ident,number,user_company(u),str(val(u,'id','')),subject,str(d.get('category','General')),str(d.get('priority','Normal')),desc,str(d.get('diagnostics','')),'open',ts,ts)
+    return jsonify(ok=True,ticket_number=number)
