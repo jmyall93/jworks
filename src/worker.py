@@ -247,7 +247,7 @@ def ai_config():
     return jsonify(provider='OpenRouter',model='openrouter/free',configured=bool(d.get('ai_worker_secret_nonempty')),
         secret_location='jworks-ai Cloudflare Worker secret',transport=d.get('transport','JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter'),
         ai_worker_secret_present=bool(d.get('ai_worker_secret_present')),ai_worker_secret_nonempty=bool(d.get('ai_worker_secret_nonempty')),
-        authorization_header_present=bool(d.get('authorization_header_present')),diagnostic_version='11.2.5')
+        authorization_header_present=bool(d.get('authorization_header_present')),diagnostic_version='11.2.6')
 
 def openrouter_key_validation(diag):
     try:
@@ -262,10 +262,13 @@ def openrouter_key_validation(diag):
 def ai_test():
     u,e=require_user(True)
     if e:return e
-    diag={'transport':'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter','diagnostic_version':'11.2.5'}
+    diag={'transport':'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter','diagnostic_version':'11.2.6'}
     try:
         d=ai_service_call('/diagnostics',{},diag)
         diag['ai_worker_reached']=bool(d.get('ai_worker_reached',True));diag['ai_worker_secret_present']=bool(d.get('ai_worker_secret_present'));diag['ai_worker_secret_nonempty']=bool(d.get('ai_worker_secret_nonempty'));diag['authorization_header_present']=bool(d.get('authorization_header_present'))
+        diag['key_format_openrouter']=bool(d.get('key_format_openrouter'))
+        diag['key_length']=int(d.get('key_length',0) or 0)
+        diag['outbound_header_style']=str(d.get('outbound_header_style',''))
     except Exception as exc:
         return jsonify(error=str(exc),diagnostics=diag),503
     if not diag['ai_worker_secret_nonempty']:
