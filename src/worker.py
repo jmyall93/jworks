@@ -74,7 +74,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='12.0.1',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='12.2.0',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -856,7 +856,6 @@ def migration_profile_post_v121():
     if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
     d=body(); ident=uid(); ts=now(); q('INSERT INTO migration_profiles(id,implementation_id,source_platform,name,mapping_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',ident,str(d.get('implementation_id','')),str(d.get('source_platform','excel')),str(d.get('name','Saved mapping')),json.dumps(d.get('mapping') or {}),ts,ts);return jsonify(ok=True,id=ident)
 
-Default=wsgi.entrypoint(app)
 
 
 # ===== JWorks V12 support =====
@@ -882,3 +881,93 @@ def support_tickets_post():
             email_sent=bool(er.get('ok'))
     except Exception: pass
     return jsonify(ok=True,ticket_number=number,email_sent=email_sent)
+
+# ===== JWorks V12.2 Project Lab + Demo Workspace =====
+def _demo_mark(company_id,owner_id,kind,eid):
+    q('INSERT OR REPLACE INTO demo_records(id,company_id,owner_id,entity_type,entity_id,demo_set,created_at) VALUES(?,?,?,?,?,?,?)',uid(),company_id,owner_id,kind,eid,'northstar-v1',now())
+
+def _clear_demo(company_id,owner_id):
+    marks=rows('SELECT entity_type,entity_id FROM demo_records WHERE company_id=? AND owner_id=?',company_id,owner_id)
+    order=['approvals','procurement','decisions','meetings','issues','costs','milestones','tasks','projects']
+    allowed=set(order)
+    for kind in order:
+        for m in marks:
+            if m['entity_type']==kind and kind in allowed:q(f'DELETE FROM {kind} WHERE id=? AND owner_id=?',m['entity_id'],owner_id)
+    q('DELETE FROM demo_records WHERE company_id=? AND owner_id=?',company_id,owner_id)
+
+def _seed_demo(u):
+    owner=str(val(u,'id','')); company=user_company(u); _clear_demo(company,owner); ts=now()
+    projects=[
+      ('NS-101','North Campus Expansion','active','2026-06-01','2027-08-30',4800000,2180000,5050000,'Construction underway; vendor award is pressuring the mobilization path.'),
+      ('NS-204','Warehouse Automation Upgrade','active','2026-08-15','2027-03-31',1250000,520000,1295000,'Controls and integration upgrade with staged validation.'),
+      ('NS-310','ERP Modernization','active','2026-04-01','2027-05-15',780000,455000,865000,'Data migration dependency has slipped and requires recovery planning.'),
+      ('NS-415','Regional Office Renovation','active','2026-09-01','2027-02-28',425000,126000,418000,'Renovation progressing within approved budget.'),
+      ('NS-522','Production Line Expansion','planning','2026-11-01','2027-10-30',2100000,0,2100000,'Business case and capital approval in progress.'),
+      ('NS-608','Energy Efficiency Program','active','2026-05-15','2027-01-31',650000,302000,628000,'Lighting and controls packages progressing ahead of plan.'),
+      ('NS-714','Customer Portal Launch','active','2026-07-01','2026-12-18',310000,248000,352000,'Release is at risk due to unresolved acceptance defects.'),
+      ('NS-088','Distribution Study','complete','2026-01-10','2026-06-20',185000,179500,179500,'Completed planning study used to prioritize future investments.')]
+    pids={}
+    for code,name,status,sd,ed,budget,actual,forecast,desc in projects:
+        pid=uid();pids[code]=pid;q('INSERT INTO projects(id,owner_id,name,description,start_date,end_date,status,estimated_cost,actual_cost,created_at,project_code,forecast_cost,contingency,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',pid,owner,name,desc,sd,ed,status,budget,actual,ts,code,forecast,budget*.08,'DEMO · Northstar Industries');_demo_mark(company,owner,'projects',pid)
+    tasksets={
+      'NS-101':[('Finalize structural package','done',100,'2026-09-18','high'),('Award mechanical package','in_progress',70,'2026-10-09','critical'),('Mobilize mechanical contractor','todo',0,'2026-10-19','critical'),('Complete level 1 rough-in','todo',0,'2026-11-20','high')],
+      'NS-204':[('Panel fabrication','done',100,'2026-09-25','high'),('PLC integration testing','in_progress',65,'2026-10-02','high'),('Site acceptance test','todo',0,'2026-10-23','high')],
+      'NS-310':[('Clean legacy data','in_progress',55,'2026-09-30','critical'),('Migration rehearsal','todo',0,'2026-10-14','critical'),('Department validation','todo',0,'2026-10-28','high')],
+      'NS-415':[('Demolition','done',100,'2026-09-22','medium'),('Interior framing','in_progress',80,'2026-10-12','medium'),('Electrical rough-in','in_progress',60,'2026-10-16','medium')],
+      'NS-522':[('Finalize business case','in_progress',75,'2026-10-20','high'),('Capital approval','todo',0,'2026-11-03','high')],
+      'NS-608':[('Lighting package','done',100,'2026-09-12','medium'),('Controls optimization','in_progress',85,'2026-10-16','medium')],
+      'NS-714':[('UAT defect correction','in_progress',45,'2026-09-28','critical'),('Security acceptance','todo',0,'2026-10-15','high'),('Release readiness','todo',0,'2026-11-02','high')],
+      'NS-088':[('Final study report','done',100,'2026-06-15','medium')]}
+    for code,items in tasksets.items():
+      prev=None
+      for name,status,prog,due,pri in items:
+        tid=uid();q('INSERT INTO tasks(id,project_id,owner_id,name,due_date,status,priority,notes,depends_on,created_at,progress,duration_days,dependency_type) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',tid,pids[code],owner,name,due,status,pri,'DEMO task',prev,ts,prog,5,'FS');_demo_mark(company,owner,'tasks',tid);prev=tid
+    extras=[
+      ('milestones','NS-101',('Mechanical mobilization','2026-10-19',0)),('milestones','NS-204',('Site acceptance','2026-10-23',0)),('milestones','NS-714',('Production release','2026-12-18',0)),
+      ('issues','NS-101',('Vendor award threatens mobilization','risk','high','open','Procurement Lead','2026-10-09','Award must be complete to protect critical path.')),
+      ('issues','NS-310',('Legacy data cleansing behind plan','issue','high','open','ERP Lead','2026-10-10','Migration rehearsal cannot start with current defect backlog.')),
+      ('issues','NS-714',('Acceptance defect backlog','issue','critical','open','Product Lead','2026-10-12','Release confidence is falling.')),
+      ('approvals','NS-101',('procurement','Mechanical package award','Approval required before contractor mobilization.','pending',640000,10)),
+      ('procurement','NS-101',('Mechanical package','Apex Mechanical','evaluation','2026-09-15','', '2026-10-19',640000,'Three bids received; recommendation awaiting approval.')),
+      ('meetings','NS-310',('ERP Recovery Meeting','2026-10-05','PM, Data Lead, Finance','Data cleansing remains behind plan. Owners agreed to daily defect burn-down.','Protect rehearsal date; add daily recovery huddle.')),
+      ('decisions','NS-204',('D-014','Stage commissioning by zone','Commission zones independently to protect production availability.','approved','Steering Committee','2026-09-29'))]
+    for kind,code,data in extras:
+      eid=uid();pid=pids[code]
+      if kind=='milestones':q('INSERT INTO milestones(id,project_id,owner_id,title,due_date,done) VALUES(?,?,?,?,?,?)',eid,pid,owner,*data)
+      elif kind=='issues':q('INSERT INTO issues(id,project_id,owner_id,title,kind,severity,status,owner_name,due_date,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',eid,pid,owner,*data,ts)
+      elif kind=='approvals':q('INSERT INTO approvals(id,project_id,owner_id,kind,title,description,status,amount,schedule_days,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',eid,pid,owner,*data,ts)
+      elif kind=='procurement':q('INSERT INTO procurement(id,project_id,owner_id,item,vendor,status,rfq_date,po_number,delivery_date,amount,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',eid,pid,owner,*data,ts)
+      elif kind=='meetings':q('INSERT INTO meetings(id,project_id,owner_id,title,meeting_date,attendees,notes,decisions,created_at) VALUES(?,?,?,?,?,?,?,?,?)',eid,pid,owner,*data,ts)
+      elif kind=='decisions':q('INSERT INTO decisions(id,project_id,owner_id,decision_no,title,decision,status,decided_by,decision_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',eid,pid,owner,*data,ts)
+      _demo_mark(company,owner,kind,eid)
+    return len(projects)
+
+@app.get('/api/demo-workspace')
+def demo_workspace_status_v122():
+    u,e=require_user()
+    if e:return e
+    n=first('SELECT COUNT(*) n FROM demo_records WHERE company_id=? AND owner_id=?',user_company(u),str(val(u,'id','')))
+    return jsonify(loaded=int(val(n,'n',0))>0,records=int(val(n,'n',0)),demo_set='northstar-v1')
+
+@app.post('/api/demo-workspace/load')
+def demo_workspace_load_v122():
+    u,e=require_user(True)
+    if e:return e
+    if str(val(u,'role','')) not in ('platform_owner','admin'):return jsonify(error='Admin access required'),403
+    return jsonify(ok=True,projects=_seed_demo(u))
+
+@app.post('/api/demo-workspace/reset')
+def demo_workspace_reset_v122():
+    u,e=require_user(True)
+    if e:return e
+    if str(val(u,'role','')) not in ('platform_owner','admin'):return jsonify(error='Admin access required'),403
+    return jsonify(ok=True,projects=_seed_demo(u))
+
+@app.post('/api/demo-workspace/clear')
+def demo_workspace_clear_v122():
+    u,e=require_user(True)
+    if e:return e
+    if str(val(u,'role','')) not in ('platform_owner','admin'):return jsonify(error='Admin access required'),403
+    _clear_demo(user_company(u),str(val(u,'id','')));return jsonify(ok=True)
+
+Default=wsgi.entrypoint(app)
