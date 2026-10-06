@@ -1,7 +1,7 @@
 {
   "name": "jworks-cloud",
   "private": true,
-  "version": "10.3.2",
+  "version": "10.3.3",
   "devDependencies": {
     "wrangler": "^4.0.0"
   },

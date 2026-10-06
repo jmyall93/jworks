@@ -1,6 +1,6 @@
 from flask import Flask, Response, jsonify, request
 from pyodide.ffi import run_sync
-from workers import wsgi, fetch as worker_fetch
+from workers import wsgi, fetch as worker_fetch, env as worker_env
 from datetime import datetime, timedelta, timezone
 import hashlib, hmac, secrets, uuid, json
 from pyodide.ffi import to_js
@@ -73,7 +73,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.3.2-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='10.3.3-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -129,9 +129,25 @@ def logout():
 
 
 
+def openrouter_secret_state():
+    # 10.3.3: read the binding through Cloudflare's documented Python Workers env
+    # object. Keep diagnostics boolean-only so credentials can never be exposed.
+    state={'secret_present':False,'secret_nonempty':False,'secret_is_text':False}
+    try:
+        raw=worker_env.OPENROUTER_API_KEY
+        state['secret_present']=raw is not None
+        try:
+            key=str(raw).strip()
+            state['secret_is_text']=isinstance(key,str)
+            state['secret_nonempty']=bool(key)
+        except Exception:
+            key=''
+        return key,state
+    except Exception:
+        return '',state
+
 def openrouter_key():
-    try:return str(env().OPENROUTER_API_KEY).strip()
-    except Exception:return ''
+    return openrouter_secret_state()[0]
 
 def provider_error(raw,status=None):
     """Return a useful provider error without ever exposing credentials."""
@@ -181,18 +197,30 @@ def ai_status():
 def ai_config():
     u,e=require_user()
     if e:return e
-    configured=bool(openrouter_key())
-    return jsonify(provider='OpenRouter',model='openrouter/free',configured=configured,secret_location='Cloudflare Worker secret',transport='workers.fetch',secret_present=configured,authorization_constructed=configured)
+    key,state=openrouter_secret_state(); configured=bool(key)
+    return jsonify(provider='OpenRouter',model='openrouter/free',configured=configured,
+        secret_location='Cloudflare Worker secret',transport='workers.fetch',
+        secret_present=state['secret_present'],secret_nonempty=state['secret_nonempty'],
+        secret_is_text=state['secret_is_text'],authorization_constructed=configured,
+        diagnostic_version='10.3.3')
 
 @app.post('/api/ai-test')
 def ai_test():
     u,e=require_user(True)
     if e:return e
-    if not openrouter_key():return jsonify(error='OPENROUTER_API_KEY is not configured in Cloudflare.'),503
+    key,state=openrouter_secret_state()
+    diag={'secret_present':state['secret_present'],'secret_nonempty':state['secret_nonempty'],
+          'secret_is_text':state['secret_is_text'],'authorization_constructed':bool(key),
+          'transport':'workers.fetch','diagnostic_version':'10.3.3'}
+    if not key:return jsonify(error='OPENROUTER_API_KEY is not available to the running Worker.',diagnostics=diag),503
     try:
         answer,raw=openrouter_chat([{'role':'user','content':'Reply with exactly: JWorks AI connection successful'}],model='openrouter/free',temperature=0)
-        return jsonify(ok=True,message='OpenRouter connection successful.',model=str(raw.get('model','openrouter/free')),response=answer[:160])
-    except Exception as exc:return jsonify(error=str(exc)),502
+        diag['openrouter_reached']=True;diag['openrouter_authenticated']=True
+        return jsonify(ok=True,message='OpenRouter connection successful.',model=str(raw.get('model','openrouter/free')),response=answer[:160],diagnostics=diag)
+    except Exception as exc:
+        diag['openrouter_reached']=True
+        diag['openrouter_authenticated']=False
+        return jsonify(error=str(exc),diagnostics=diag),502
 
 @app.get('/api/system-status')
 def system_status():
