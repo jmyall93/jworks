@@ -73,7 +73,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='11.2-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='11.2.1-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -204,7 +204,7 @@ def ai_service_call(path,payload,diagnostics=None):
     try:
         svc=env().AI
     except Exception:
-        raise RuntimeError('JWorks AI service binding is not configured. Deploy V11.2 with npm run deploy.')
+        raise RuntimeError('JWorks AI service binding is not configured. Deploy V11.2.1 with npm run deploy.')
     data=dict(payload or {}); data['api_key']=key
     resp=run_sync(svc.fetch('https://jworks-ai.internal/'+path.lstrip('/'),method='POST',headers={'Content-Type':'application/json'},body=json.dumps(data)))
     txt=str(run_sync(resp.text()))
@@ -246,10 +246,10 @@ def ai_config():
         secret_location='Cloudflare Worker secret',transport='JavaScript AI service binding',
         secret_present=state['secret_present'],secret_nonempty=state['secret_nonempty'],
         secret_is_text=state['secret_is_text'],authorization_constructed=configured,
-        diagnostic_version='11.2')
+        diagnostic_version='11.2.1')
 
 def openrouter_key_validation(key,diag):
-    """Validate the configured credential through the V11.2 JavaScript AI service."""
+    """Validate the configured credential through the V11.2.1 JavaScript AI service."""
     try:
         raw=ai_service_call('/key-test',{},diag)
         diag['key_endpoint_reached']=bool(raw.get('openrouter_reached',True))
@@ -268,7 +268,7 @@ def ai_test():
     key,state=openrouter_secret_state()
     diag={'secret_present':state['secret_present'],'secret_nonempty':state['secret_nonempty'],
           'secret_is_text':state['secret_is_text'],'authorization_constructed':bool(key),
-          'transport':'Python Worker -> AI service binding -> JavaScript fetch -> OpenRouter','diagnostic_version':'11.2'}
+          'transport':'Python Worker -> AI service binding -> JavaScript fetch -> OpenRouter','diagnostic_version':'11.2.1'}
     if not key:return jsonify(error='OPENROUTER_API_KEY is not available to the running Worker.',diagnostics=diag),503
     openrouter_key_validation(key,diag)
     try:
