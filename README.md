@@ -1,34 +1,30 @@
-# JWorks 10.2 Cloud
+# JWorks 10.2.1 Cloud
 
-Cloud migration branch of JWorks, based on JWorks 10.1.4 Fresh Start.
+Cloudflare Workers + D1 edition, based on JWorks 10.1.4 Fresh Start.
 
-## Included from 10.1.4
-- JWorks Command Center + Focus Deck
-- Pending Dependency terminology
-- Project-only Gantt
-- Editable AI-generated task plans (edit/add/remove/reorder before creation)
-- Fresh-start data model; no user/project/task data or API keys are committed
+## Included in 10.2.1
+- D1-backed first administrator setup, login, logout, secure cookie sessions and CSRF protection.
+- Core cloud CRUD for projects, tasks, checklists, milestones, costs, risks/issues, inbox, meetings, changes, decisions, procurement and field reports.
+- Scope of Work Builder inside every project.
+  - Manual structured scope creation.
+  - AI-generated contractor-ready first drafts through OpenRouter.
+  - Hybrid editing: AI draft remains fully editable; sections can be added, removed, edited and reordered.
+  - Contractor/staff print layout with browser Print / Save as PDF.
+  - Draft / Internal Review / Approved for Bid / Issued / Awarded status.
+- Project-only Gantt and editable AI task-plan UI from 10.1.4 are retained.
+- R2/file attachments remain intentionally disabled.
 
-## Cloud architecture
-- Cloudflare Python Worker + Flask
-- Cloudflare Static Assets for the JWorks frontend
-- D1 binding `DB` for application data
-- R2 binding `FILES` for attachments/documents
-- OpenRouter key intended to be stored as a Cloudflare secret
+## Existing Cloudflare deployment upgrade
+1. In Cloudflare D1 > jworks-db > Console, run `migrations/0002_cloud_auth_sow.sql` once.
+2. Upload/commit this release to the existing GitHub `jworks` repository.
+3. Cloudflare should redeploy automatically. Deploy command remains `uv run pywrangler deploy`.
+4. Open JWorks. Because the database is fresh, the login screen should change to **Create administrator**. Create the first account with a password of at least 12 characters.
 
-## Important migration status
-This repository is intentionally a **cloud migration foundation**, not yet the production replacement for JWorks 10.1.4 Windows.
+## AI Scope generation
+Manual and hybrid SOW editing work without an AI key. To generate AI drafts, add a Cloudflare Worker secret named `OPENROUTER_API_KEY` containing your OpenRouter API key. Never commit the key to GitHub.
 
-The frontend and Cloudflare resource configuration are ready. `/api/health` tests the D1 binding. The full local Flask API still needs to be converted from Python `sqlite3`, filesystem uploads and Flask server sessions to D1/R2/cloud-compatible authentication. Unconverted API routes return an explicit 503 instead of silently losing data.
+## PDF output
+Open a scope and choose **Print / Save PDF**. JWorks opens a clean Letter-size contractor document and invokes the browser print dialog. Choose **Save as PDF** to create the bid-package PDF, or choose a printer for a paper copy.
 
-Keep using JWorks 10.1.4 Windows until the cloud API conversion is completed and tested.
-
-## First Cloudflare setup
-1. Create a D1 database named `jworks-db`.
-2. Put its database ID into `wrangler.jsonc` in place of `REPLACE_WITH_D1_DATABASE_ID`.
-3. Create an R2 bucket named `jworks-files`.
-4. Apply `migrations/0001_initial_schema.sql` using D1 migrations.
-5. Add `OPENROUTER_API_KEY` and `SECRET_KEY` as Cloudflare secrets when the API migration reaches those features.
-6. Deploy the Worker.
-
-The next guided setup step is creating/binding the D1 database in Cloudflare.
+## Current migration boundary
+10.2.1 converts authentication plus the most important project/task and SOW workflows. Some older advanced endpoints (templates, report revisions, baselines, full AI Project Builder, attachments, etc.) still return a clear cloud-migration message until converted. Keep the 10.1.4 Windows build as the fallback copy while cloud migration continues.
