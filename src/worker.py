@@ -240,7 +240,13 @@ def pending(path):return jsonify(error='This feature is still being converted to
 @app.get('/')
 @app.get('/<path:path>')
 def frontend(path=''):
-    a=env().ASSETS;ap=path or 'index.html';r=run_sync(a.fetch(f'https://assets.local/{ap}'))
-    if r.status==404 and '.' not in ap:r=run_sync(a.fetch('https://assets.local/index.html'))
+    # Cloudflare ASSETS resolves against the request pathname. Using a synthetic
+    # assets.local hostname caused deployed /static/* requests to return 404.
+    a=env().ASSETS
+    ap=path or 'index.html'
+    origin=request.host_url.rstrip('/')
+    r=run_sync(a.fetch(f'{origin}/{ap}'))
+    if r.status==404 and '.' not in ap:
+        r=run_sync(a.fetch(f'{origin}/index.html'))
     return Response(run_sync(r.bytes()),status=r.status,headers=r.headers)
 Default=wsgi.entrypoint(app)
