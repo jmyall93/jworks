@@ -10,18 +10,23 @@ function providerMessage(data){
   return 'OpenRouter rejected the request.';
 }
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method !== 'POST') return json({error:'Service binding only.'},405);
     const input = await readJson(request);
-    const key = String(input.api_key || '').trim();
-    if (!key) return json({error:'AI service did not receive the server-side OpenRouter key.'},503);
+    // V11.2.4: credential lives only on jworks-ai.
+    const key = String(env?.OPENROUTER_API_KEY || '').trim();
+    if (!key) return json({error:'OPENROUTER_API_KEY is not configured on the jworks-ai Worker.',secret_present:false},503);
     const headers = new Headers();
     headers.set('Authorization', `Bearer ${key}`);
     headers.set('Accept','application/json');
     headers.set('Content-Type','application/json');
     headers.set('HTTP-Referer','https://jworks.jeffmyall6.workers.dev');
     headers.set('X-Title','JWorks');
+    if (url.pathname === '/diagnostics') {
+      const auth = new Headers(); auth.set('Authorization', `Bearer ${key}`);
+      return json({ok:true,ai_worker:true,secret_present:true,secret_nonempty:key.length>0,authorization_header_present:auth.has('Authorization'),transport:'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter'});
+    }
     if (url.pathname === '/key-test') {
       const r = await fetch(`${ORIGIN}/api/v1/key`, {method:'GET', headers, redirect:'manual'});
       let data; try { data=await r.json(); } catch { data={}; }
