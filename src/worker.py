@@ -207,9 +207,18 @@ def ai_service_call(path,payload,diagnostics=None):
         raise RuntimeError('JWorks AI service binding is not configured. Deploy V11.2.1 with npm run deploy.')
     data=dict(payload or {}); data['api_key']=key
     resp=run_sync(svc.fetch('https://jworks-ai.internal/'+path.lstrip('/'),method='POST',headers={'Content-Type':'application/json'},body=json.dumps(data)))
-    txt=str(run_sync(resp.text()))
-    try: raw=json.loads(txt)
-    except Exception: raw={'error':txt[:500]}
+    # Cloudflare Python Workers expose service-binding responses through the JS FFI.
+    # Parse JSON directly instead of stringifying response.text(), which can produce
+    # a JS proxy representation rather than the actual response body.
+    try:
+        parsed=run_sync(resp.json())
+        raw=dict(parsed) if parsed is not None else {}
+    except Exception:
+        try:
+            txt=run_sync(resp.text())
+            raw=json.loads(str(txt))
+        except Exception:
+            raw={'error':'JWorks AI service returned an unreadable response.'}
     if diagnostics is not None:
         diagnostics['ai_service_reached']=True
         diagnostics['ai_service_status']=int(resp.status)
@@ -224,9 +233,9 @@ def openrouter_chat(messages,model='openrouter/free',temperature=0.2,diagnostics
         diagnostics['openrouter_reached']=bool(raw.get('openrouter_reached',True))
         diagnostics['openrouter_authenticated']=bool(raw.get('authenticated',True))
     try:
-        content=raw['data']['choices'][0]['message']['content']
+        content=raw.get('content') or raw['data']['choices'][0]['message']['content']
         if not content: raise ValueError('empty response')
-        return str(content),raw['data']
+        return str(content),raw.get('data') or {'model':raw.get('model',model)}
     except Exception:
         raise RuntimeError('OpenRouter returned a response JWorks could not read.')
 
@@ -249,7 +258,7 @@ def ai_config():
         diagnostic_version='11.2.1')
 
 def openrouter_key_validation(key,diag):
-    """Validate the configured credential through the V11.2.1 JavaScript AI service."""
+    """Validate the configured credential through the V11.2.3 JavaScript AI service."""
     try:
         raw=ai_service_call('/key-test',{},diag)
         diag['key_endpoint_reached']=bool(raw.get('openrouter_reached',True))
@@ -268,7 +277,7 @@ def ai_test():
     key,state=openrouter_secret_state()
     diag={'secret_present':state['secret_present'],'secret_nonempty':state['secret_nonempty'],
           'secret_is_text':state['secret_is_text'],'authorization_constructed':bool(key),
-          'transport':'Python Worker -> AI service binding -> JavaScript fetch -> OpenRouter','diagnostic_version':'11.2.1'}
+          'transport':'Python Worker -> AI service binding -> JavaScript fetch -> OpenRouter','diagnostic_version':'11.2.3'}
     if not key:return jsonify(error='OPENROUTER_API_KEY is not available to the running Worker.',diagnostics=diag),503
     openrouter_key_validation(key,diag)
     try:

@@ -25,14 +25,16 @@ export default {
     if (url.pathname === '/key-test') {
       const r = await fetch(`${ORIGIN}/api/v1/key`, {method:'GET', headers, redirect:'manual'});
       let data; try { data=await r.json(); } catch { data={}; }
-      return json({openrouter_reached:true, authenticated:r.ok, status:r.status, error:r.ok?'':providerMessage(data)}, 200);
+      return json({ok:r.ok,openrouter_reached:true,authenticated:r.ok,status:r.status,provider:'OpenRouter',error:r.ok?'':providerMessage(data)},200);
     }
     if (url.pathname === '/chat') {
       const payload={model:input.model||'openrouter/free',messages:Array.isArray(input.messages)?input.messages:[],temperature:Number(input.temperature??0.2)};
       const r=await fetch(`${ORIGIN}/api/v1/chat/completions`,{method:'POST',headers,body:JSON.stringify(payload),redirect:'manual'});
       let data; try { data=await r.json(); } catch { data={}; }
       if(!r.ok) return json({openrouter_reached:true,authenticated:false,status:r.status,error:`OpenRouter HTTP ${r.status}: ${providerMessage(data)}`},502);
-      return json({openrouter_reached:true,authenticated:true,status:r.status,data});
+      const content=data?.choices?.[0]?.message?.content;
+      if(typeof content!=='string' || !content.trim()) return json({ok:false,openrouter_reached:true,authenticated:true,status:r.status,error:'OpenRouter returned HTTP 200 but no readable assistant message.',response_shape:Object.keys(data||{})},502);
+      return json({ok:true,openrouter_reached:true,authenticated:true,status:r.status,content,model:data?.model||payload.model,data});
     }
     return json({error:'Unknown AI service route.'},404);
   }
