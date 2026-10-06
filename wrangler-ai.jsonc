@@ -1,0 +1,7 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jworks-ai",
+  "main": "src/ai-worker.js",
+  "compatibility_date": "2026-10-06",
+  "workers_dev": false
+}

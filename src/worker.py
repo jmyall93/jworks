@@ -73,7 +73,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='11.1-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='11.2-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -191,36 +191,42 @@ def provider_error(raw,status=None):
         if t: msg=t[:500]
     return msg[:500]
 
-def openrouter_chat(messages,model='openrouter/free',temperature=0.2,diagnostics=None):
-    # 10.3.5: use the Python Workers SDK fetch signature exactly as documented by
-    # Cloudflare: fetch(url, method=..., headers={...}, body=...).  This removes
-    # the JS Request/Headers conversion layer from the OpenRouter subrequest.
+def ai_service_call(path,payload,diagnostics=None):
+    """Send AI work to the internal JavaScript Worker through a Cloudflare service binding.
+    The OpenRouter key stays server-side and is never returned to the browser.
+    """
     key=openrouter_key()
     if not key: raise RuntimeError('OPENROUTER_API_KEY is not configured in Cloudflare.')
-    payload=json.dumps({'model':model,'messages':messages,'temperature':temperature})
-    headers={
-        'Authorization':'Bearer '+key,
-        'Content-Type':'application/json',
-        'X-Title':'JWorks'
-    }
     if diagnostics is not None:
-        diagnostics['authorization_constructed']=bool(headers.get('Authorization'))
-        diagnostics['direct_fetch_headers']=True
-        diagnostics['transport']='workers.fetch(url, method, headers, body)'
-    resp=run_sync(worker_fetch(
-        'https://openrouter.ai/api/v1/chat/completions',
-        method='POST',
-        headers=headers,
-        body=payload
-    ))
+        diagnostics['authorization_constructed']=True
+        diagnostics['ai_service_binding']=True
+        diagnostics['transport']='Python Worker -> AI service binding -> JavaScript fetch -> OpenRouter'
+    try:
+        svc=env().AI
+    except Exception:
+        raise RuntimeError('JWorks AI service binding is not configured. Deploy V11.2 with npm run deploy.')
+    data=dict(payload or {}); data['api_key']=key
+    resp=run_sync(svc.fetch('https://jworks-ai.internal/'+path.lstrip('/'),method='POST',headers={'Content-Type':'application/json'},body=json.dumps(data)))
     txt=str(run_sync(resp.text()))
     try: raw=json.loads(txt)
-    except Exception: raw={'raw':txt[:500]}
-    if not resp.ok: raise RuntimeError(f'OpenRouter HTTP {resp.status}: {provider_error(raw,resp.status)}')
+    except Exception: raw={'error':txt[:500]}
+    if diagnostics is not None:
+        diagnostics['ai_service_reached']=True
+        diagnostics['ai_service_status']=int(resp.status)
+    if not resp.ok:
+        msg=raw.get('error','JWorks AI service rejected the request.') if isinstance(raw,dict) else 'JWorks AI service rejected the request.'
+        raise RuntimeError(str(msg)[:500])
+    return raw
+
+def openrouter_chat(messages,model='openrouter/free',temperature=0.2,diagnostics=None):
+    raw=ai_service_call('/chat',{'model':model,'messages':messages,'temperature':temperature},diagnostics)
+    if diagnostics is not None:
+        diagnostics['openrouter_reached']=bool(raw.get('openrouter_reached',True))
+        diagnostics['openrouter_authenticated']=bool(raw.get('authenticated',True))
     try:
-        content=raw['choices'][0]['message']['content']
+        content=raw['data']['choices'][0]['message']['content']
         if not content: raise ValueError('empty response')
-        return str(content),raw
+        return str(content),raw['data']
     except Exception:
         raise RuntimeError('OpenRouter returned a response JWorks could not read.')
 
@@ -237,22 +243,20 @@ def ai_config():
     if e:return e
     key,state=openrouter_secret_state(); configured=bool(key)
     return jsonify(provider='OpenRouter',model='openrouter/free',configured=configured,
-        secret_location='Cloudflare Worker secret',transport='workers.fetch(url, method, headers, body)',
+        secret_location='Cloudflare Worker secret',transport='JavaScript AI service binding',
         secret_present=state['secret_present'],secret_nonempty=state['secret_nonempty'],
         secret_is_text=state['secret_is_text'],authorization_constructed=configured,
-        diagnostic_version='11.1')
+        diagnostic_version='11.2')
 
 def openrouter_key_validation(key,diag):
-    """Validate the configured credential independently of chat completions."""
+    """Validate the configured credential through the V11.2 JavaScript AI service."""
     try:
-        headers={'Authorization':'Bearer '+key,'Accept':'application/json'}
-        resp=run_sync(worker_fetch('https://openrouter.ai/api/v1/key',method='GET',headers=headers))
-        txt=str(run_sync(resp.text()))
-        diag['key_endpoint_reached']=True
-        diag['key_endpoint_status']=int(resp.status)
-        diag['key_authenticated']=bool(resp.ok)
-        if not resp.ok: diag['key_error']=provider_error(txt,resp.status)
-        return bool(resp.ok)
+        raw=ai_service_call('/key-test',{},diag)
+        diag['key_endpoint_reached']=bool(raw.get('openrouter_reached',True))
+        diag['key_endpoint_status']=int(raw.get('status',200))
+        diag['key_authenticated']=bool(raw.get('authenticated',False))
+        if not diag['key_authenticated']: diag['key_error']=str(raw.get('error','Authentication failed'))[:300]
+        return diag['key_authenticated']
     except Exception as exc:
         diag['key_endpoint_reached']=False;diag['key_authenticated']=False;diag['key_error']=str(exc)[:300]
         return False
@@ -264,7 +268,7 @@ def ai_test():
     key,state=openrouter_secret_state()
     diag={'secret_present':state['secret_present'],'secret_nonempty':state['secret_nonempty'],
           'secret_is_text':state['secret_is_text'],'authorization_constructed':bool(key),
-          'transport':'workers.fetch(url, method, headers, body)','diagnostic_version':'11.1'}
+          'transport':'Python Worker -> AI service binding -> JavaScript fetch -> OpenRouter','diagnostic_version':'11.2'}
     if not key:return jsonify(error='OPENROUTER_API_KEY is not available to the running Worker.',diagnostics=diag),503
     openrouter_key_validation(key,diag)
     try:
