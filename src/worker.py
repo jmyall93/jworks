@@ -682,7 +682,10 @@ def preferences_get():
     r=first('SELECT config_json FROM user_preferences WHERE user_id=?',str(val(u,'id','')))
     try: cfg=json.loads(str(val(r,'config_json','{}') or '{}')) if r else {}
     except Exception: cfg={}
-    return jsonify(config=cfg)
+    r2=first('SELECT settings_json FROM user_preferences WHERE user_id=?',str(val(u,'id','')))
+    try: settings=json.loads(str(val(r2,'settings_json','{}') or '{}')) if r2 else {}
+    except Exception: settings={}
+    return jsonify(config=cfg,settings=settings)
 
 @app.post('/api/preferences')
 def preferences_save():
@@ -783,15 +786,6 @@ def import_xlsx_commit():
         else:
             data={k:x.get(k) for k in ['project_id','name','start_date','due_date','status','priority','notes']};data['created_at']=now();insert_named('tasks',str(u.id),TASK_FIELDS,data);count+=1
     return jsonify(count=count)
-
-@app.get('/api/preferences')
-def preferences_get():
-    u,e=require_user()
-    if e:return e
-    r=first('SELECT settings_json FROM user_preferences WHERE user_id=?',str(val(u,'id','')))
-    try: settings=json.loads(str(val(r,'settings_json','{}') or '{}'))
-    except Exception: settings={}
-    return jsonify(settings=settings)
 
 @app.put('/api/preferences')
 def preferences_put():
