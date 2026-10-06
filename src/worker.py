@@ -58,7 +58,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.2.7-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='10.2.9-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -69,11 +69,38 @@ def session_status():
     return jsonify(authenticated=bool(u),username=(str(val(u,'username','')) if u else None),csrf=(str(val(u,'csrf','')) if u else None))
 @app.post('/api/setup')
 def setup():
-    if first('SELECT id FROM users LIMIT 1') is not None: return jsonify(error='Administrator already exists'),409
+    # First-run administrator creation. Keep each stage explicit so Cloudflare/D1
+    # failures return a useful JSON error instead of an opaque HTTP 500.
+    try:
+        if first('SELECT id FROM users LIMIT 1') is not None:
+            return jsonify(error='Administrator already exists'),409
+    except Exception as e:
+        return jsonify(error='Could not check administrator state',stage='check-users',detail=str(e)),500
+
     d=body(); username=str(d.get('username','')).strip(); password=str(d.get('password',''))
     if len(username)<3:return jsonify(error='Username must be at least 3 characters'),400
     if len(password)<12:return jsonify(error='Password must be at least 12 characters'),400
-    i=uid();q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',i,username,hash_password(password),now());return create_session(i,username)
+
+    try:
+        password_hash=hash_password(password)
+    except Exception as e:
+        return jsonify(error='Could not securely hash the password',stage='password-hash',detail=str(e)),500
+
+    i=uid()
+    try:
+        q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',i,username,password_hash,now())
+    except Exception as e:
+        return jsonify(error='Could not save the administrator to D1',stage='insert-user',detail=str(e)),500
+
+    try:
+        return create_session(i,username)
+    except Exception as e:
+        # Do not leave a half-created administrator that prevents first-run setup.
+        try:q('DELETE FROM sessions WHERE user_id=?',i)
+        except Exception:pass
+        try:q('DELETE FROM users WHERE id=?',i)
+        except Exception:pass
+        return jsonify(error='Administrator could not be signed in; setup was rolled back',stage='create-session',detail=str(e)),500
 @app.post('/api/login')
 def login():
     d=body();r=first('SELECT id,username,password_hash FROM users WHERE username=?',str(d.get('username','')).strip())
