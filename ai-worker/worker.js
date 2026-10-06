@@ -14,19 +14,28 @@ export default {
     const url = new URL(request.url);
     if (request.method !== 'POST') return json({error:'Service binding only.'},405);
     const input = await readJson(request);
-    // V11.2.4: credential lives only on jworks-ai.
-    const key = String(env?.OPENROUTER_API_KEY || '').trim();
-    if (!key) return json({error:'OPENROUTER_API_KEY is not configured on the jworks-ai Worker.',secret_present:false},503);
+    // V11.2.5: OpenRouter credentials live only on this JavaScript Worker.
+    // Never accept an API key from the browser or the Python Worker.
+    const key = typeof env?.OPENROUTER_API_KEY === 'string' ? env.OPENROUTER_API_KEY.trim() : '';
+    if (url.pathname === '/diagnostics') {
+      const probe = new Headers();
+      if (key) probe.set('Authorization', `Bearer ${key}`);
+      return json({
+        ok: Boolean(key),
+        ai_worker_reached: true,
+        ai_worker_secret_present: env?.OPENROUTER_API_KEY !== undefined && env?.OPENROUTER_API_KEY !== null,
+        ai_worker_secret_nonempty: Boolean(key),
+        authorization_header_present: probe.has('Authorization'),
+        transport: 'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter'
+      }, 200);
+    }
+    if (!key) return json({error:'OPENROUTER_API_KEY is not configured on the jworks-ai Worker.',ai_worker_secret_present:false,ai_worker_secret_nonempty:false},503);
     const headers = new Headers();
     headers.set('Authorization', `Bearer ${key}`);
     headers.set('Accept','application/json');
     headers.set('Content-Type','application/json');
     headers.set('HTTP-Referer','https://jworks.jeffmyall6.workers.dev');
     headers.set('X-Title','JWorks');
-    if (url.pathname === '/diagnostics') {
-      const auth = new Headers(); auth.set('Authorization', `Bearer ${key}`);
-      return json({ok:true,ai_worker:true,secret_present:true,secret_nonempty:key.length>0,authorization_header_present:auth.has('Authorization'),transport:'JWorks Python -> jworks-ai -> native JavaScript fetch -> OpenRouter'});
-    }
     if (url.pathname === '/key-test') {
       const r = await fetch(`${ORIGIN}/api/v1/key`, {method:'GET', headers, redirect:'manual'});
       let data; try { data=await r.json(); } catch { data={}; }
