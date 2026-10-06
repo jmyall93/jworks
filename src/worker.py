@@ -1,6 +1,6 @@
 from flask import Flask, Response, jsonify, request
 from pyodide.ffi import run_sync
-from workers import wsgi
+from workers import wsgi, fetch as worker_fetch
 from datetime import datetime, timedelta, timezone
 import hashlib, hmac, secrets, uuid, json
 from pyodide.ffi import to_js
@@ -73,7 +73,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.3.0-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='10.3.2-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -149,21 +149,16 @@ def provider_error(raw,status=None):
 def openrouter_chat(messages,model='openrouter/free',temperature=0.2):
     key=openrouter_key()
     if not key: raise RuntimeError('OPENROUTER_API_KEY is not configured in Cloudflare.')
-    from js import fetch, Headers, Object
     payload=json.dumps({'model':model,'messages':messages,'temperature':temperature})
-    # Build Headers and RequestInit as native JavaScript objects. Cloudflare's
-    # Python runtime can silently lose nested Python-dict headers during FFI
-    # conversion; native Headers keeps Authorization intact.
-    headers=Headers.new()
-    headers.set('Authorization','Bearer '+key)
-    headers.set('Content-Type','application/json')
-    headers.set('HTTP-Referer',request.host_url.rstrip('/'))
-    headers.set('X-Title','JWorks')
-    opts=Object.new()
-    opts.method='POST'
-    opts.headers=headers
-    opts.body=payload
-    resp=run_sync(fetch('https://openrouter.ai/api/v1/chat/completions',opts))
+    # 10.3.2: use Cloudflare Python Workers native outbound fetch API directly.
+    # This avoids the Pyodide -> JavaScript RequestInit bridge that dropped Authorization.
+    headers={
+        'Authorization':'Bearer '+key,
+        'Content-Type':'application/json',
+        'HTTP-Referer':request.host_url.rstrip('/'),
+        'X-Title':'JWorks'
+    }
+    resp=run_sync(worker_fetch('https://openrouter.ai/api/v1/chat/completions', method='POST', headers=headers, body=payload))
     txt=str(run_sync(resp.text()))
     try: raw=json.loads(txt)
     except Exception: raw={'raw':txt[:500]}
@@ -187,7 +182,7 @@ def ai_config():
     u,e=require_user()
     if e:return e
     configured=bool(openrouter_key())
-    return jsonify(provider='OpenRouter',model='openrouter/free',configured=configured,secret_location='Cloudflare Worker secret')
+    return jsonify(provider='OpenRouter',model='openrouter/free',configured=configured,secret_location='Cloudflare Worker secret',transport='workers.fetch',secret_present=configured,authorization_constructed=configured)
 
 @app.post('/api/ai-test')
 def ai_test():
@@ -418,6 +413,23 @@ def change_password():
     if not r or not verify_password(current,str(val(r,'password_hash',''))):return jsonify(error='Current password is incorrect'),400
     q('UPDATE users SET password_hash=? WHERE id=?',hash_password(new),str(val(u,'id','')))
     q('DELETE FROM sessions WHERE user_id=? AND id<>?',str(val(u,'id','')),request.cookies.get('jworks_session',''))
+    return jsonify(ok=True)
+
+@app.get('/api/preferences')
+def preferences_get():
+    u,e=require_user()
+    if e:return e
+    r=first('SELECT config_json FROM user_preferences WHERE user_id=?',str(val(u,'id','')))
+    try: cfg=json.loads(str(val(r,'config_json','{}') or '{}')) if r else {}
+    except Exception: cfg={}
+    return jsonify(config=cfg)
+
+@app.post('/api/preferences')
+def preferences_save():
+    u,e=require_user(True)
+    if e:return e
+    cfg=body().get('config') or {}
+    q('INSERT INTO user_preferences(user_id,config_json,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at',str(val(u,'id','')),json.dumps(cfg),now())
     return jsonify(ok=True)
 
 @app.get('/api/report-templates')
