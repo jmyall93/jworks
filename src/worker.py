@@ -48,7 +48,7 @@ def verify_password(p,stored):
 def current_user():
     sid=request.cookies.get('jworks_session');
     if not sid:return None
-    r=first("SELECT u.id,u.username,s.csrf,s.expires_at,m.company_id,m.role,c.name AS company_name,c.login_code,c.logo_data_url,c.report_footer,c.status AS company_status FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN company_memberships m ON m.user_id=u.id AND m.status='active' LEFT JOIN companies c ON c.id=m.company_id WHERE s.id=? ORDER BY CASE m.role WHEN 'platform_owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END LIMIT 1",sid)
+    r=first("SELECT u.id,u.username,s.csrf,s.expires_at,m.company_id,m.role,c.name AS company_name,c.login_code,c.logo_data_url,c.report_footer,c.status AS company_status,c.inactivity_minutes FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN company_memberships m ON m.user_id=u.id AND m.status='active' LEFT JOIN companies c ON c.id=m.company_id WHERE s.id=? ORDER BY CASE m.role WHEN 'platform_owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END LIMIT 1",sid)
     if not r:return None
     if str(val(r,'expires_at',''))<now(): q('DELETE FROM sessions WHERE id=?',sid); return None
     return r
@@ -74,7 +74,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='11.2.1-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='12.0.1',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -82,7 +82,7 @@ def setup_needed():
 @app.get('/api/session')
 def session_status():
     u=current_user()
-    return jsonify(authenticated=bool(u),username=(str(val(u,'username','')) if u else None),csrf=(str(val(u,'csrf','')) if u else None),company_id=(str(val(u,'company_id','')) if u else None),company_name=(str(val(u,'company_name','')) if u else None),company_code=(str(val(u,'login_code','')) if u else None),role=(str(val(u,'role','')) if u else None),company_logo=(str(val(u,'logo_data_url','')) if u else None),report_footer=(str(val(u,'report_footer','Generated with JWorks')) if u else None))
+    return jsonify(authenticated=bool(u),username=(str(val(u,'username','')) if u else None),csrf=(str(val(u,'csrf','')) if u else None),company_id=(str(val(u,'company_id','')) if u else None),company_name=(str(val(u,'company_name','')) if u else None),company_code=(str(val(u,'login_code','')) if u else None),role=(str(val(u,'role','')) if u else None),company_logo=(str(val(u,'logo_data_url','')) if u else None),report_footer=(str(val(u,'report_footer','Generated with JWorks')) if u else None),inactivity_minutes=(int(val(u,'inactivity_minutes',10) or 10) if u else 10))
 @app.post('/api/setup')
 def setup():
     # First-run administrator creation. Keep each stage explicit so Cloudflare/D1
@@ -477,8 +477,8 @@ def company_admin(u): return user_role(u) in ('platform_owner','admin')
 def company_get():
     u,e=require_user();
     if e:return e
-    c=first('SELECT id,login_code,name,status,plan,seat_limit,trial_ends_at,logo_data_url,address,report_footer,created_at FROM companies WHERE id=?',user_company(u))
-    return jsonify(company={k:val(c,k,'') for k in ['id','login_code','name','status','plan','seat_limit','trial_ends_at','logo_data_url','address','report_footer','created_at']},role=user_role(u))
+    c=first('SELECT id,login_code,name,status,plan,seat_limit,trial_ends_at,logo_data_url,address,report_footer,accent_color,branding_mode,feature_flags,support_email,inactivity_minutes,document_branding,created_at FROM companies WHERE id=?',user_company(u))
+    return jsonify(company={k:val(c,k,'') for k in ['id','login_code','name','status','plan','seat_limit','trial_ends_at','logo_data_url','address','report_footer','accent_color','branding_mode','feature_flags','support_email','inactivity_minutes','document_branding','created_at']},role=user_role(u))
 
 @app.patch('/api/company')
 def company_patch():
@@ -486,7 +486,7 @@ def company_patch():
     if e:return e
     if not company_admin(u):return jsonify(error='Company administrator access required'),403
     d=body(); fields=[]; vals=[]
-    for f in ['name','logo_data_url','address','report_footer']:
+    for f in ['name','logo_data_url','address','report_footer','accent_color','branding_mode','feature_flags','support_email','inactivity_minutes','document_branding']:
         if f in d: fields.append(f+'=?'); vals.append(str(d[f]))
     if fields:q('UPDATE companies SET '+','.join(fields)+' WHERE id=?',*vals,user_company(u))
     return jsonify(ok=True)
@@ -784,23 +784,59 @@ def import_xlsx_commit():
             data={k:x.get(k) for k in ['project_id','name','start_date','due_date','status','priority','notes']};data['created_at']=now();insert_named('tasks',str(u.id),TASK_FIELDS,data);count+=1
     return jsonify(count=count)
 
+@app.get('/api/preferences')
+def preferences_get():
+    u,e=require_user()
+    if e:return e
+    r=first('SELECT settings_json FROM user_preferences WHERE user_id=?',str(val(u,'id','')))
+    try: settings=json.loads(str(val(r,'settings_json','{}') or '{}'))
+    except Exception: settings={}
+    return jsonify(settings=settings)
+
+@app.put('/api/preferences')
+def preferences_put():
+    u,e=require_user(True)
+    if e:return e
+    settings=body().get('settings') or {}
+    q('INSERT INTO user_preferences(user_id,settings_json,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET settings_json=excluded.settings_json,updated_at=excluded.updated_at',str(val(u,'id','')),json.dumps(settings),now())
+    return jsonify(ok=True)
+
+@app.post('/api/public-inquiry')
+def public_inquiry():
+    d=body(); email=str(d.get('email','')).strip(); subject=str(d.get('subject','')).strip(); message=str(d.get('message','')).strip()
+    if not email or not subject or not message:return jsonify(error='Email, subject and message are required'),400
+    ident=uid(); number='WEB-'+datetime.now(timezone.utc).strftime('%y%m%d')+'-'+ident[:5].upper()
+    q('INSERT INTO public_inquiries(id,inquiry_number,name,email,category,subject,message,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)',ident,number,str(d.get('name','')),email,str(d.get('category','General')),subject,message,'open',now())
+    sent=False
+    try:
+        owner=first("SELECT support_email FROM companies WHERE login_code='JWORKS-OWNER'"); dest=str(val(owner,'support_email','')).strip()
+        if dest: sent=bool(ai_service_call('/support-email',{'to':dest,'subject':'JWorks Website '+number+' — '+subject,'text':'From: '+str(d.get('name',''))+' <'+email+'>\nCategory: '+str(d.get('category','General'))+'\n\n'+message}).get('ok'))
+    except Exception: pass
+    return jsonify(ok=True,inquiry_number=number,email_sent=sent)
+
 Default=wsgi.entrypoint(app)
 
 
 # ===== JWorks V12 support =====
 @app.get('/api/support-tickets')
 def support_tickets_get():
-    u=auth_user()
-    if not u:return jsonify(error='Unauthorized'),401
+    u,e=require_user()
+    if e:return e
     return jsonify(tickets=rows('SELECT id,ticket_number,subject,category,priority,status,created_at FROM support_tickets WHERE company_id=? ORDER BY created_at DESC LIMIT 100',user_company(u)))
 
 @app.post('/api/support-tickets')
 def support_tickets_post():
-    u=auth_user()
-    if not u:return jsonify(error='Unauthorized'),401
-    if not csrf_ok(u):return jsonify(error='Invalid CSRF token'),403
+    u,e=require_user(True)
+    if e:return e
     d=body(); subject=str(d.get('subject','')).strip(); desc=str(d.get('description','')).strip()
     if not subject or not desc:return jsonify(error='Subject and description are required'),400
     ts=now(); ident=uid(); number='JW-'+datetime.now(timezone.utc).strftime('%y%m%d')+'-'+ident[:5].upper()
     q('INSERT INTO support_tickets(id,ticket_number,company_id,user_id,subject,category,priority,description,diagnostics,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',ident,number,user_company(u),str(val(u,'id','')),subject,str(d.get('category','General')),str(d.get('priority','Normal')),desc,str(d.get('diagnostics','')),'open',ts,ts)
-    return jsonify(ok=True,ticket_number=number)
+    email_sent=False
+    try:
+        c=first('SELECT support_email,name FROM companies WHERE id=?',user_company(u)); dest=str(val(c,'support_email','')).strip()
+        if dest:
+            er=ai_service_call('/support-email',{'to':dest,'subject':'JWorks Support '+number+' — '+subject,'text':'Company: '+str(val(c,'name',''))+'\nTicket: '+number+'\nPriority: '+str(d.get('priority','Normal'))+'\n\n'+desc})
+            email_sent=bool(er.get('ok'))
+    except Exception: pass
+    return jsonify(ok=True,ticket_number=number,email_sent=email_sent)

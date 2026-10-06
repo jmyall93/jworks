@@ -117,6 +117,16 @@ export default {
     if (request.method !== 'POST') return json({ error: 'Service binding only.' }, 405);
 
     const input = await readJson(request);
+    if (url.pathname === '/support-email') {
+      const resendKey = normalizeKey(env?.RESEND_API_KEY);
+      if (!resendKey) return json({ok:false,error:'RESEND_API_KEY is not configured on jworks-ai.'}, 503);
+      const to = String(input.to || '').trim();
+      if (!to) return json({ok:false,error:'Support destination is not configured.'}, 400);
+      const from = String(env?.SUPPORT_FROM_EMAIL || 'JWorks Support <support@jworks.app>');
+      const response = await fetch('https://api.resend.com/emails', {method:'POST',headers:{'Authorization':`Bearer ${resendKey}`,'Content-Type':'application/json'},body:JSON.stringify({from,to:[to],subject:String(input.subject||'JWorks Support'),text:String(input.text||'')})});
+      const data = await parseProviderResponse(response);
+      return json({ok:response.ok,status:response.status,id:data?.id||'',error:response.ok?'':providerMessage(data)}, response.ok?200:502);
+    }
     const rawSecretPresent = env?.OPENROUTER_API_KEY !== undefined && env?.OPENROUTER_API_KEY !== null;
     const key = normalizeKey(env?.OPENROUTER_API_KEY);
     const headers = openRouterHeaders(key);
