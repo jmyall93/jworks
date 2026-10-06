@@ -149,16 +149,20 @@ def provider_error(raw,status=None):
 def openrouter_chat(messages,model='openrouter/free',temperature=0.2):
     key=openrouter_key()
     if not key: raise RuntimeError('OPENROUTER_API_KEY is not configured in Cloudflare.')
-    from js import fetch, Object
+    from js import fetch, Headers, Object
     payload=json.dumps({'model':model,'messages':messages,'temperature':temperature})
-    # Use a real JavaScript RequestInit object. This preserves Authorization
-    # under Pyodide/Cloudflare; nested Python dictionaries could lose headers.
-    opts=to_js({'method':'POST','headers':{
-        'Authorization':'Bearer '+key,
-        'Content-Type':'application/json',
-        'HTTP-Referer':request.host_url.rstrip('/'),
-        'X-Title':'JWorks'
-    },'body':payload},dict_converter=Object.fromEntries)
+    # Build Headers and RequestInit as native JavaScript objects. Cloudflare's
+    # Python runtime can silently lose nested Python-dict headers during FFI
+    # conversion; native Headers keeps Authorization intact.
+    headers=Headers.new()
+    headers.set('Authorization','Bearer '+key)
+    headers.set('Content-Type','application/json')
+    headers.set('HTTP-Referer',request.host_url.rstrip('/'))
+    headers.set('X-Title','JWorks')
+    opts=Object.new()
+    opts.method='POST'
+    opts.headers=headers
+    opts.body=payload
     resp=run_sync(fetch('https://openrouter.ai/api/v1/chat/completions',opts))
     txt=str(run_sync(resp.text()))
     try: raw=json.loads(txt)

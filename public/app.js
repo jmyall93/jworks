@@ -353,8 +353,15 @@ async function deleteReportTemplate103(id){await run(async()=>{await api('report
 
 function enhanceVoiceFields(root=document){
  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR)return;
- root.querySelectorAll('textarea,input[type="text"],input:not([type])').forEach(el=>{if(el.dataset.voiceReady||el.type==='password')return;el.dataset.voiceReady='1';let b=document.createElement('button');b.type='button';b.className='voice-btn';b.title='Voice to text';b.textContent='🎙 Dictate';b.onclick=()=>voiceInto103(el,b,SR);el.insertAdjacentElement('afterend',b)});
+ root.querySelectorAll('textarea,input[type="text"],input:not([type])').forEach(el=>{
+  if(el.dataset.voiceReady||el.type==='password'||el.disabled||el.readOnly)return;
+  el.dataset.voiceReady='1';
+  const host=document.createElement('span');host.className='voice-field';
+  el.parentNode.insertBefore(host,el);host.appendChild(el);
+  const b=document.createElement('button');b.type='button';b.className='voice-btn';b.title='Voice to text';b.setAttribute('aria-label','Voice to text');b.textContent='🎙';
+  b.onclick=e=>{e.preventDefault();e.stopPropagation();voiceInto103(el,b,SR)};host.appendChild(b);
+ });
 }
-function voiceInto103(el,b,SR){let r=new SR();r.lang='en-CA';r.interimResults=true;r.continuous=false;let base=el.value.trim();b.classList.add('listening');b.textContent='● Listening…';r.onresult=e=>{let t='';for(let i=e.resultIndex;i<e.results.length;i++)t+=e.results[i][0].transcript;el.value=(base?base+' ':'')+t;el.dispatchEvent(new Event('input',{bubbles:true}))};r.onerror=e=>{toast('Voice input: '+e.error)};r.onend=()=>{b.classList.remove('listening');b.textContent='🎙 Dictate'};try{r.start()}catch(e){toast('Microphone is already active')}}
+function voiceInto103(el,b,SR){let r=new SR();r.lang='en-CA';r.interimResults=true;r.continuous=false;let base=el.value.trim();b.classList.add('listening');b.textContent='●';r.onresult=e=>{let t='';for(let i=e.resultIndex;i<e.results.length;i++)t+=e.results[i][0].transcript;el.value=(base?base+' ':'')+t;el.dispatchEvent(new Event('input',{bubbles:true}))};r.onerror=e=>{toast('Voice input: '+e.error)};r.onend=()=>{b.classList.remove('listening');b.textContent='🎙'};try{r.start()}catch(e){toast('Microphone is already active')}}
 new MutationObserver(()=>enhanceVoiceFields()).observe(document.body,{childList:true,subtree:true});
 applyPrefs();
