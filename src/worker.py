@@ -3,6 +3,7 @@ from pyodide.ffi import run_sync
 from workers import wsgi
 from datetime import datetime, timedelta, timezone
 import hashlib, hmac, secrets, uuid, json
+from pyodide.ffi import to_js
 
 app=Flask(__name__)
 def env(): return request.environ['workers.env']
@@ -72,7 +73,7 @@ def create_session(user_id,username):
 def health():
     try: ok=bool(first('SELECT 1 AS ok'))
     except Exception as e:return jsonify(ok=False,database=False,error=str(e)),503
-    return jsonify(ok=True,app='JWorks',version='10.2.12-cloud',database=ok,storage=False)
+    return jsonify(ok=True,app='JWorks',version='10.3.0-cloud',database=ok,storage=False)
 @app.get('/api/setup-needed')
 def setup_needed():
     try:r=first('SELECT COUNT(*) AS n FROM users');return jsonify(needed=(first('SELECT id FROM users LIMIT 1') is None))
@@ -148,10 +149,17 @@ def provider_error(raw,status=None):
 def openrouter_chat(messages,model='openrouter/free',temperature=0.2):
     key=openrouter_key()
     if not key: raise RuntimeError('OPENROUTER_API_KEY is not configured in Cloudflare.')
-    from js import fetch, Headers
+    from js import fetch, Object
     payload=json.dumps({'model':model,'messages':messages,'temperature':temperature})
-    headers=Headers.new();headers.set('Authorization','Bearer '+key);headers.set('Content-Type','application/json');headers.set('HTTP-Referer',request.host_url.rstrip('/'));headers.set('X-Title','JWorks')
-    resp=run_sync(fetch('https://openrouter.ai/api/v1/chat/completions',{'method':'POST','headers':headers,'body':payload}))
+    # Use a real JavaScript RequestInit object. This preserves Authorization
+    # under Pyodide/Cloudflare; nested Python dictionaries could lose headers.
+    opts=to_js({'method':'POST','headers':{
+        'Authorization':'Bearer '+key,
+        'Content-Type':'application/json',
+        'HTTP-Referer':request.host_url.rstrip('/'),
+        'X-Title':'JWorks'
+    },'body':payload},dict_converter=Object.fromEntries)
+    resp=run_sync(fetch('https://openrouter.ai/api/v1/chat/completions',opts))
     txt=str(run_sync(resp.text()))
     try: raw=json.loads(txt)
     except Exception: raw={'raw':txt[:500]}
@@ -361,4 +369,71 @@ def frontend(path=''):
     if r.status==404 and '.' not in ap:
         r=run_sync(a.fetch(f'{origin}/index.html'))
     return Response(run_sync(r.bytes()),status=r.status,headers=r.headers)
+
+
+def is_admin(u):
+    try:
+        r=first('SELECT id FROM users ORDER BY created_at ASC LIMIT 1')
+        return bool(r and str(val(r,'id',''))==str(val(u,'id','')))
+    except Exception:return False
+
+@app.get('/api/users')
+def users_list():
+    u,e=require_user();
+    if e:return e
+    if not is_admin(u):return jsonify(error='Administrator access required'),403
+    return jsonify(users=rows('SELECT id,username,created_at FROM users ORDER BY created_at ASC'),current_user_id=str(val(u,'id','')))
+
+@app.post('/api/users')
+def users_create():
+    u,e=require_user(True);
+    if e:return e
+    if not is_admin(u):return jsonify(error='Administrator access required'),403
+    d=body(); username=str(d.get('username','')).strip(); password=str(d.get('password',''))
+    if len(username)<3:return jsonify(error='Username must be at least 3 characters'),400
+    if not password:return jsonify(error='Password is required'),400
+    try:q('INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)',uid(),username,hash_password(password),now())
+    except Exception as exc:return jsonify(error='Could not create user: '+str(exc)),400
+    return jsonify(ok=True)
+
+@app.delete('/api/users/<idv>')
+def users_delete(idv):
+    u,e=require_user(True);
+    if e:return e
+    if not is_admin(u):return jsonify(error='Administrator access required'),403
+    if idv==str(val(u,'id','')):return jsonify(error='You cannot delete the account you are currently using.'),400
+    q('DELETE FROM users WHERE id=?',idv);return jsonify(ok=True)
+
+@app.post('/api/change-password')
+def change_password():
+    u,e=require_user(True);
+    if e:return e
+    d=body(); current=str(d.get('current_password','')); new=str(d.get('new_password',''))
+    if not new:return jsonify(error='New password is required'),400
+    r=first('SELECT password_hash FROM users WHERE id=?',str(val(u,'id','')))
+    if not r or not verify_password(current,str(val(r,'password_hash',''))):return jsonify(error='Current password is incorrect'),400
+    q('UPDATE users SET password_hash=? WHERE id=?',hash_password(new),str(val(u,'id','')))
+    q('DELETE FROM sessions WHERE user_id=? AND id<>?',str(val(u,'id','')),request.cookies.get('jworks_session',''))
+    return jsonify(ok=True)
+
+@app.get('/api/report-templates')
+def report_templates_list():
+    u,e=require_user();
+    if e:return e
+    return jsonify(items=rows('SELECT id,title,config_json,created_at FROM custom_report_templates WHERE owner_id=? ORDER BY created_at DESC',str(val(u,'id',''))))
+
+@app.post('/api/report-templates')
+def report_templates_create():
+    u,e=require_user(True);
+    if e:return e
+    d=body(); title=str(d.get('title','')).strip()
+    if not title:return jsonify(error='Report name is required'),400
+    i=uid();q('INSERT INTO custom_report_templates(id,owner_id,title,config_json,created_at) VALUES(?,?,?,?,?)',i,str(val(u,'id','')),title,json.dumps(d.get('config') or {}),now());return jsonify(id=i)
+
+@app.delete('/api/report-templates/<idv>')
+def report_templates_delete(idv):
+    u,e=require_user(True);
+    if e:return e
+    q('DELETE FROM custom_report_templates WHERE id=? AND owner_id=?',idv,str(val(u,'id','')));return jsonify(ok=True)
+
 Default=wsgi.entrypoint(app)

@@ -1,9 +1,22 @@
 {
-  "name": "JWorks",
+  "name": "JWorks Mobile",
   "short_name": "JWorks",
-  "start_url": "/",
+  "start_url": "/?source=pwa",
   "display": "standalone",
   "background_color": "#080d17",
   "theme_color": "#080d17",
-  "description": "JWorks personal project and work command center"
+  "description": "JWorks mobile project command center",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
 }
