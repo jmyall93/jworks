@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "jworks-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "e714c771-188d-4411-88ee-46d218d2f539",
       "migrations_dir": "migrations"
     }
   ],
