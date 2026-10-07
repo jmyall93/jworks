@@ -320,7 +320,7 @@ def state():
     return jsonify(out)
 
 PROJECT_FIELDS=['created_at','name','description','start_date','end_date','status','asset','contractor','po_number','estimated_cost','actual_cost','shutdown_required','commissioning','closeout','notes','project_code','forecast_cost','contingency']
-TASK_FIELDS=['created_at','project_id','name','start_date','due_date','status','priority','notes','depends_on','recurring','recurring_from','progress','duration_days','dependency_type']
+TASK_FIELDS=['created_at','project_id','name','start_date','due_date','status','priority','notes','depends_on','recurring','recurring_from','progress','duration_days','dependency_type','phase_id','assignee','estimated_hours','actual_hours','tags']
 def insert_named(table,owner,fields,d,defaults=None):
     defaults=defaults or {}; i=uid(); vals=[]; cols=['id','owner_id']
     for f in fields:
@@ -379,6 +379,7 @@ def task_delete(idv):
 
 SIMPLE={
 'checklist':('checklist',['task_id','title','done','sort_order']), 'milestones':('milestones',['project_id','title','due_date','done']),
+'phases':('phases',['project_id','title','sort_order','start_date','end_date']),
 'costs':('costs',['project_id','title','vendor','po_number','amount','status','cost_date','notes']), 'issues':('issues',['project_id','title','kind','severity','status','owner_name','due_date','notes']),
 'inbox':('inbox',['title','notes']), 'meetings':('meetings',['project_id','title','meeting_date','attendees','notes','decisions']),
 'changes':('changes',['project_id','title','description','cost_impact','schedule_days','status']), 'decisions':('decisions',['project_id','decision_no','title','decision','status','decided_by','decision_date']),
@@ -405,6 +406,29 @@ def simple_change(kind,idv):
     table,fields=SIMPLE[kind]
     if request.method=='DELETE':q(f'DELETE FROM {table} WHERE id=? AND owner_id=?',idv,str(u.id))
     else:patch_named(table,idv,str(u.id),fields,body())
+    return jsonify(ok=True)
+
+@app.post('/api/automation-rules')
+def automation_rule_create_v131():
+    u,e=require_user(True)
+    if e:return e
+    d=body(); title=str(d.get('title','')).strip()
+    if not title:return jsonify(error='Rule name is required'),400
+    i=uid(); q('INSERT INTO automation_rules(id,owner_id,title,trigger_type,condition_json,action_type,action_json,enabled,created_at) VALUES(?,?,?,?,?,?,?,?,?)',i,str(u.id),title,str(d.get('trigger_type','schedule')),json.dumps(d.get('condition') or {}),str(d.get('action_type','report')),json.dumps(d.get('action') or {}),1,now())
+    return jsonify(id=i)
+
+@app.route('/api/automation-rules/<idv>',methods=['PATCH','DELETE'])
+def automation_rule_change_v131(idv):
+    u,e=require_user(True)
+    if e:return e
+    if request.method=='DELETE':
+        q('DELETE FROM automation_rules WHERE id=? AND owner_id=?',idv,str(u.id)); return jsonify(ok=True)
+    d=body(); fields=[]; vals=[]
+    if 'enabled' in d: fields.append('enabled=?'); vals.append(1 if d.get('enabled') else 0)
+    if 'title' in d: fields.append('title=?'); vals.append(str(d.get('title','')))
+    if 'condition' in d: fields.append('condition_json=?'); vals.append(json.dumps(d.get('condition') or {}))
+    if 'action' in d: fields.append('action_json=?'); vals.append(json.dumps(d.get('action') or {}))
+    if fields:q('UPDATE automation_rules SET '+','.join(fields)+' WHERE id=? AND owner_id=?',*vals,idv,str(u.id))
     return jsonify(ok=True)
 
 @app.post('/api/scopes')
