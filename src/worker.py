@@ -882,11 +882,16 @@ def support_tickets_post():
     except Exception: pass
     return jsonify(ok=True,ticket_number=number,email_sent=email_sent)
 
-# ===== JWorks V12.2 Project Lab + Demo Workspace =====
+# ===== JWorks V12.2.1 Project Lab + Demo Workspace =====
+def _ensure_demo_table():
+    q("CREATE TABLE IF NOT EXISTS demo_records (id TEXT PRIMARY KEY, company_id TEXT NOT NULL, owner_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, demo_set TEXT NOT NULL DEFAULT 'northstar-v1', created_at TEXT NOT NULL)")
+    q("CREATE INDEX IF NOT EXISTS idx_demo_company ON demo_records(company_id,demo_set)")
+
 def _demo_mark(company_id,owner_id,kind,eid):
     q('INSERT OR REPLACE INTO demo_records(id,company_id,owner_id,entity_type,entity_id,demo_set,created_at) VALUES(?,?,?,?,?,?,?)',uid(),company_id,owner_id,kind,eid,'northstar-v1',now())
 
 def _clear_demo(company_id,owner_id):
+    _ensure_demo_table()
     marks=rows('SELECT entity_type,entity_id FROM demo_records WHERE company_id=? AND owner_id=?',company_id,owner_id)
     order=['approvals','procurement','decisions','meetings','issues','costs','milestones','tasks','projects']
     allowed=set(order)
@@ -896,6 +901,7 @@ def _clear_demo(company_id,owner_id):
     q('DELETE FROM demo_records WHERE company_id=? AND owner_id=?',company_id,owner_id)
 
 def _seed_demo(u):
+    _ensure_demo_table()
     owner=str(val(u,'id','')); company=user_company(u); _clear_demo(company,owner); ts=now()
     projects=[
       ('NS-101','North Campus Expansion','active','2026-06-01','2027-08-30',4800000,2180000,5050000,'Construction underway; vendor award is pressuring the mobilization path.'),
@@ -946,6 +952,7 @@ def _seed_demo(u):
 def demo_workspace_status_v122():
     u,e=require_user()
     if e:return e
+    _ensure_demo_table()
     n=first('SELECT COUNT(*) n FROM demo_records WHERE company_id=? AND owner_id=?',user_company(u),str(val(u,'id','')))
     return jsonify(loaded=int(val(n,'n',0))>0,records=int(val(n,'n',0)),demo_set='northstar-v1')
 
