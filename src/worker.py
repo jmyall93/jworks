@@ -560,7 +560,7 @@ def platform_companies():
     u,e=require_user();
     if e:return e
     if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
-    return jsonify(companies=rows("SELECT c.id,c.login_code,c.name,c.status,c.plan,c.seat_limit,c.trial_ends_at,c.created_at,(SELECT COUNT(*) FROM company_memberships m WHERE m.company_id=c.id AND m.status='active') AS seats_used,(SELECT COUNT(*) FROM projects p JOIN company_memberships mm ON mm.user_id=p.owner_id WHERE mm.company_id=c.id) AS projects FROM companies c ORDER BY c.created_at DESC"))
+    return jsonify(companies=rows("SELECT c.id,c.login_code,c.name,c.status,c.plan,c.seat_limit,c.trial_ends_at,c.created_at,c.feature_flags,c.support_email,c.inactivity_minutes,c.document_branding,c.accent_color,(SELECT COUNT(*) FROM company_memberships m WHERE m.company_id=c.id AND m.status='active') AS seats_used,(SELECT COUNT(*) FROM projects p JOIN company_memberships mm ON mm.user_id=p.owner_id WHERE mm.company_id=c.id) AS projects FROM companies c ORDER BY c.created_at DESC"))
 
 @app.post('/api/platform/companies')
 def platform_company_create():
@@ -632,10 +632,62 @@ def platform_company_patch(idv):
     if e:return e
     if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
     d=body(); fields=[];vals=[]
-    for f in ['name','status','plan','seat_limit','logo_data_url','address','report_footer']:
+    for f in ['name','status','plan','seat_limit','logo_data_url','address','report_footer','feature_flags','support_email','inactivity_minutes','document_branding','accent_color']:
         if f in d:fields.append(f+'=?');vals.append(d[f])
     if fields:q('UPDATE companies SET '+','.join(fields)+' WHERE id=?',*vals,idv)
     if 'seat_limit' in d or 'plan' in d or 'status' in d:q('UPDATE subscriptions SET seat_limit=COALESCE(?,seat_limit),plan=COALESCE(?,plan),status=COALESCE(?,status),updated_at=? WHERE company_id=?',d.get('seat_limit'),d.get('plan'),d.get('status'),now(),idv)
+    owner_audit('company.updated','company',idv,','.join(d.keys()))
+    return jsonify(ok=True)
+
+@app.get('/api/platform/overview')
+def platform_overview_v132():
+    u,e=require_user()
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    def count(sql,*args):
+        r=first(sql,*args); return int(val(r,'n',0) or 0)
+    return jsonify(
+        companies=count("SELECT COUNT(*) n FROM companies WHERE login_code<>'JWORKS-OWNER'"),
+        active_companies=count("SELECT COUNT(*) n FROM companies WHERE login_code<>'JWORKS-OWNER' AND status='active'"),
+        trials=count("SELECT COUNT(*) n FROM companies WHERE login_code<>'JWORKS-OWNER' AND status='trial'"),
+        active_users=count("SELECT COUNT(*) n FROM company_memberships m JOIN companies c ON c.id=m.company_id WHERE c.login_code<>'JWORKS-OWNER' AND m.status='active'"),
+        projects=count("SELECT COUNT(*) n FROM projects"), tasks=count("SELECT COUNT(*) n FROM tasks"),
+        reports=count("SELECT COUNT(*) n FROM report_snapshots"), tickets=count("SELECT COUNT(*) n FROM support_tickets WHERE status NOT IN ('closed','resolved')"))
+
+@app.get('/api/platform/users')
+def platform_users_v132():
+    u,e=require_user()
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    return jsonify(users=rows("SELECT u.id,u.username,u.created_at,m.role,m.status,c.id company_id,c.name company_name,c.login_code FROM users u JOIN company_memberships m ON m.user_id=u.id JOIN companies c ON c.id=m.company_id ORDER BY c.name,u.username"))
+
+@app.get('/api/platform/audit')
+def platform_audit_v132():
+    u,e=require_user()
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    return jsonify(items=rows("SELECT * FROM platform_audit ORDER BY created_at DESC LIMIT 200"))
+
+def owner_audit(action,target_type='',target_id='',detail=''):
+    try:q('INSERT INTO platform_audit(id,actor_user_id,action,target_type,target_id,detail,created_at) VALUES(?,?,?,?,?,?,?)',uid(),'platform-owner',action,target_type,target_id,str(detail)[:2000],now())
+    except Exception:pass
+
+@app.get('/api/platform/settings')
+def platform_settings_v132():
+    u,e=require_user()
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    return jsonify(settings={str(val(x,'key','')):str(val(x,'value','')) for x in rows('SELECT key,value FROM platform_settings')})
+
+@app.patch('/api/platform/settings')
+def platform_settings_patch_v132():
+    u,e=require_user(True)
+    if e:return e
+    if not platform_owner(u):return jsonify(error='JWorks Platform Owner access required'),403
+    d=body(); allowed={'maintenance_mode','default_plan','default_seat_limit','trial_days','support_email','ai_enabled','reports_enabled','new_gantt_enabled'}
+    for k,v in d.items():
+        if k in allowed:q('INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at',k,str(v),now())
+    owner_audit('platform.settings.updated','platform','','; '.join(k+'='+str(v) for k,v in d.items() if k in allowed))
     return jsonify(ok=True)
 
 @app.route('/api/<path:path>',methods=['GET','POST','PUT','PATCH','DELETE'])
