@@ -26,5 +26,13 @@
       "binding": "AI",
       "service": "jworks-ai"
     }
+{
+  "observability": {
+    "logs": {
+      "enabled": false,
+      "invocation_logs": true
+    }
+  }
+}
   ]
 }
