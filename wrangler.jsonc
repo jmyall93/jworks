@@ -21,18 +21,15 @@
       "migrations_dir": "migrations"
     }
   ],
-  "services": [
-    {
-      "binding": "AI",
-      "service": "jworks-ai"
-    }
-{
-  "observability": {
-    "logs": {
-      "enabled": true,
-      "invocation_logs": true
-    }
+ "services": [
+  {
+    "binding": "AI",
+    "service": "jworks-ai"
   }
-}
-  ]
+],
+"observability": {
+  "logs": {
+    "enabled": true,
+    "invocation_logs": true
+  }
 }
