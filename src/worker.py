@@ -824,8 +824,20 @@ def _xlsx_rows(blob):
 
 def _norm_status(v,kind):
     x=str(v or '').strip().lower().replace(' ','_')
-    if kind=='projects': return {'active':'active','planned':'planned','planning':'planned','complete':'complete','completed':'complete','on_hold':'on_hold','on hold':'on_hold'}.get(x,x or 'active')
+    if kind=='projects': return {'active':'active','planned':'upcoming','planning':'upcoming','upcoming':'upcoming','complete':'complete','completed':'complete','on_hold':'on_hold','on hold':'on_hold'}.get(x,x or 'active')
     return {'to_do':'todo','todo':'todo','not_started':'todo','in_progress':'doing','in progress':'doing','doing':'doing','done':'done','complete':'done','completed':'done'}.get(x,x or 'todo')
+
+def _import_task_key(project_code, task_name):
+    return (str(project_code or '').strip().casefold(),str(task_name or '').strip().casefold())
+
+def _import_dep_key(raw, project_code):
+    # Syntax PROJECT-CODE::TASK NAME for cross-project references; task name alone is local to the project.
+    raw=str(raw or '').strip()
+    if not raw:return None
+    if '::' in raw:
+        code,name=raw.split('::',1)
+        return _import_task_key(code,name)
+    return _import_task_key(project_code,raw)
 
 @app.post('/api/import-xlsx/preview')
 def import_xlsx_preview():
@@ -835,18 +847,47 @@ def import_xlsx_preview():
     if kind not in ('projects','tasks') or not f:return jsonify(error='Choose a valid JWorks Excel template.'),400
     try: raw=_xlsx_rows(f.read())
     except Exception as exc:return jsonify(error='Could not read this .xlsx file. Use the current JWorks import template. '+str(exc)),400
-    out=[]; codes={str(x.get('project_code') or '').lower():x['id'] for x in rows('SELECT id,project_code FROM projects WHERE owner_id IN ('+','.join(['?']*len(company_user_ids(u)))+')',*company_user_ids(u)) if x.get('project_code')}
+    owners=company_user_ids(u)
+    codes={str(x.get('project_code') or '').casefold():x['id'] for x in rows('SELECT id,project_code FROM projects WHERE owner_id IN ('+','.join(['?']*len(owners))+')',*owners) if x.get('project_code')}
+    existing=rows('SELECT t.id,t.name,p.project_code,t.depends_on FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.owner_id IN ('+','.join(['?']*len(owners))+')',*owners)
+    existing_keys={}
+    for t in existing:existing_keys.setdefault(_import_task_key(t['project_code'],t['name']),[]).append(t['id'])
+    out=[]
     for idx,r in enumerate(raw,2):
         if kind=='projects':
             x={'row':idx,'name':r.get('Project Name',''),'project_code':r.get('Project Code',''),'description':r.get('Description',''),'status':_norm_status(r.get('Status'),kind),'priority':r.get('Priority',''),'start_date':r.get('Start Date',''),'end_date':r.get('Target Date',''),'estimated_cost':r.get('Budget','') or 0,'notes':r.get('Notes',''),'errors':[]}
             if not x['name']:x['errors'].append('Project Name is required')
-            if x['project_code'] and x['project_code'].lower() in codes:x['errors'].append('Project Code already exists')
+            if x['project_code'] and x['project_code'].casefold() in codes:x['errors'].append('Project Code already exists')
         else:
-            code=r.get('Project Code',''); x={'row':idx,'name':r.get('Task Name',''),'project_code':code,'description':r.get('Description',''),'status':_norm_status(r.get('Status'),kind),'priority':str(r.get('Priority','medium') or 'medium').lower(),'start_date':r.get('Start Date',''),'due_date':r.get('Due Date',''),'notes':r.get('Notes',''),'project_id':codes.get(code.lower()) if code else None,'errors':[]}
+            code=r.get('Project Code','')
+            x={'row':idx,'name':r.get('Task Name',''),'project_code':code,'description':r.get('Description',''),'status':_norm_status(r.get('Status'),kind),'priority':str(r.get('Priority','medium') or 'medium').lower(),'start_date':r.get('Start Date',''),'due_date':r.get('Due Date',''),'notes':r.get('Notes',''),'assignee':r.get('Assignee',''),'estimated_hours':r.get('Estimated Hours','') or 0,'phase_name':r.get('Phase',''),'depends_on_label':r.get('Depends On',''),'project_id':codes.get(code.casefold()) if code else None,'errors':[]}
             if not x['name']:x['errors'].append('Task Name is required')
             if code and not x['project_id']:x['errors'].append('Project Code does not match an existing project')
         out.append(x)
-    return jsonify(kind=kind,rows=out,valid_count=sum(not x['errors'] for x in out),error_count=sum(bool(x['errors']) for x in out))
+    dep_count=0
+    if kind=='tasks':
+        incoming={}
+        for x in out:incoming.setdefault(_import_task_key(x['project_code'],x['name']),[]).append(x)
+        for x in out:
+            k=_import_task_key(x['project_code'],x['name'])
+            if len(incoming[k])>1:x['errors'].append('Duplicate task name in this project; use unique names')
+            if len(existing_keys.get(k,[]))>1:x['errors'].append('Multiple existing tasks share this project and name')
+            if len(existing_keys.get(k,[]))==1:x['existing_id']=existing_keys[k][0]
+            dkey=_import_dep_key(x.get('depends_on_label'),x['project_code'])
+            if dkey:
+                dep_count+=1;x['dependency_key']=list(dkey)
+                if dkey==k:x['errors'].append('Task cannot depend on itself')
+                elif len(incoming.get(dkey,[])) + len(existing_keys.get(dkey,[]))==0:x['errors'].append('Predecessor not found: '+x['depends_on_label'])
+                elif len(incoming.get(dkey,[]))>1 or len(existing_keys.get(dkey,[]))>1:x['errors'].append('Ambiguous predecessor: '+x['depends_on_label'])
+        # Detect cycles in the incoming dependency graph, including existing tasks that will be updated.
+        graph={_import_task_key(x['project_code'],x['name']):tuple(x['dependency_key']) for x in out if x.get('dependency_key')}
+        def cycle(k,seen):
+            if k in seen:return True
+            return k in graph and cycle(graph[k],seen|{k})
+        for x in out:
+            k=_import_task_key(x['project_code'],x['name'])
+            if cycle(k,set()):x['errors'].append('Circular dependency detected')
+    return jsonify(kind=kind,rows=out,dependency_count=dep_count,valid_count=sum(not x['errors'] for x in out),error_count=sum(bool(x['errors']) for x in out))
 
 @app.post('/api/import-xlsx/commit')
 def import_xlsx_commit():
@@ -854,14 +895,50 @@ def import_xlsx_commit():
     if e:return e
     d=body();kind=d.get('kind');items=d.get('rows') or []
     if kind not in ('projects','tasks'):return jsonify(error='Invalid import type'),400
-    count=0
+    if len(items)>2000:return jsonify(error='Import batches are limited to 2000 rows'),400
+    if any(x.get('errors') for x in items):return jsonify(error='Resolve validation errors before importing'),400
+    owners=company_user_ids(u)
+    codes={str(x.get('project_code') or '').casefold():x['id'] for x in rows('SELECT id,project_code FROM projects WHERE owner_id IN ('+','.join(['?']*len(owners))+')',*owners) if x.get('project_code')}
+    if kind=='projects':
+        seen=set()
+        for x in items:
+            code=str(x.get('project_code') or '').casefold()
+            if not x.get('name') or (code and (code in codes or code in seen)):return jsonify(error='Duplicate or invalid project code; preview again'),409
+            seen.add(code)
+        for x in items:
+            data={k:x.get(k) for k in ['name','project_code','description','status','start_date','end_date','estimated_cost','notes']};data['created_at']=now();insert_named('projects',str(u.id),PROJECT_FIELDS,data)
+        return jsonify(count=len(items),dependency_count=0)
+    existing=rows('SELECT t.id,t.name,p.project_code,t.depends_on FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.owner_id IN ('+','.join(['?']*len(owners))+')',*owners)
+    bykey={}
+    for t in existing:bykey.setdefault(_import_task_key(t['project_code'],t['name']),[]).append(t['id'])
+    incoming={}
     for x in items:
-        if x.get('errors'):continue
-        if kind=='projects':
-            data={k:x.get(k) for k in ['name','project_code','description','status','start_date','end_date','estimated_cost','notes']}; data['created_at']=now(); insert_named('projects',str(u.id),PROJECT_FIELDS,data);count+=1
+        k=_import_task_key(x.get('project_code'),x.get('name'))
+        if not x.get('name') or not codes.get(k[0]) or k in incoming or len(bykey.get(k,[]))>1:return jsonify(error='Duplicate task, missing project, or ambiguous existing task; preview again'),409
+        incoming[k]=x
+    for k,x in incoming.items():
+        dep=_import_dep_key(x.get('depends_on_label'),x.get('project_code'))
+        if dep and dep not in incoming and len(bykey.get(dep,[]))!=1:return jsonify(error='Missing or ambiguous dependency for '+x['name']+'; preview again'),409
+        if dep==k:return jsonify(error='Self dependency is not permitted'),409
+    graph={k:_import_dep_key(x.get('depends_on_label'),x.get('project_code')) for k,x in incoming.items()}
+    def cyclic(k,seen):
+        if k in seen:return True
+        nxt=graph.get(k)
+        return bool(nxt and nxt in graph and cyclic(nxt,seen|{k}))
+    if any(cyclic(k,set()) for k in graph):return jsonify(error='Circular dependency detected; no rows imported'),409
+    ids={k:v[0] for k,v in bykey.items() if len(v)==1};created=0;updated=0
+    for k,x in incoming.items():
+        data={f:x.get(f) for f in ['name','start_date','due_date','status','priority','notes','assignee','estimated_hours']};data['project_id']=codes[k[0]]
+        if k in ids:
+            patch_named('tasks',ids[k],str(u.id),TASK_FIELDS,data);updated+=1
         else:
-            data={k:x.get(k) for k in ['project_id','name','start_date','due_date','status','priority','notes']};data['created_at']=now();insert_named('tasks',str(u.id),TASK_FIELDS,data);count+=1
-    return jsonify(count=count)
+            data['created_at']=now();ids[k]=insert_named('tasks',str(u.id),TASK_FIELDS,data);created+=1
+    linked=0
+    for k,x in incoming.items():
+        dep=graph[k]
+        if dep:
+            q('UPDATE tasks SET depends_on=? WHERE id=?',ids[dep],ids[k]);linked+=1
+    return jsonify(count=created,updated=updated,dependency_count=linked)
 
 @app.put('/api/preferences')
 def preferences_put():
