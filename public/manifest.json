@@ -1,11 +1,11 @@
 {
-  "name": "JWorks Mobile",
+  "name": "JWorks \u2014 Powered by REYLEX",
   "short_name": "JWorks",
   "start_url": "/?source=pwa",
   "display": "standalone",
   "background_color": "#080d17",
   "theme_color": "#080d17",
-  "description": "JWorks mobile project command center",
+  "description": "JWorks project management, powered by REYLEX",
   "orientation": "any",
   "icons": [
     {

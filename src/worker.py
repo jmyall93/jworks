@@ -839,6 +839,121 @@ def _import_dep_key(raw, project_code):
         return _import_task_key(code,name)
     return _import_task_key(project_code,raw)
 
+# V13.4: data-safe task reconciliation; all changes are scoped to the signed-in company.
+def _reconcile_tasks(u):
+    owners=company_user_ids(u)
+    return rows('SELECT t.*,p.project_code FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.owner_id IN ('+','.join(['?']*len(owners))+')',*owners)
+
+def _reconcile_groups(u):
+    groups={}
+    for t in _reconcile_tasks(u):groups.setdefault(_import_task_key(t['project_code'],t['name']),[]).append(t)
+    return groups
+
+@app.get('/api/task-reconcile/duplicates')
+def task_reconcile_duplicates():
+    u,e=require_user()
+    if e:return e
+    out=[]
+    for (code,name),ts in _reconcile_groups(u).items():
+        if len(ts)<2:continue
+        items=[]
+        for t in ts:
+            tid=t['id']; refs={}
+            for table,col in [('tasks','depends_on'),('checklist','task_id'),('attachments','task_id')]:
+                refs[table]=int(val(first('SELECT COUNT(*) AS n FROM '+table+' WHERE '+col+'=?',tid),'n',0) or 0)
+            items.append({'id':tid,'name':t['name'],'created_at':t.get('created_at'),'status':t.get('status'),'due_date':t.get('due_date'),'notes':t.get('notes'),'assignee':t.get('assignee'),'depends_on':t.get('depends_on'),'external_import_id':t.get('external_import_id'),'references':refs})
+        out.append({'project_code':code,'name':ts[0]['name'],'count':len(ts),'items':items})
+    return jsonify(groups=out,total_groups=len(out),total_extra=sum(g['count']-1 for g in out))
+
+@app.post('/api/task-reconcile/delete-empty-duplicate')
+def task_reconcile_delete_empty_duplicate():
+    u,e=require_user(True)
+    if e:return e
+    d=body();tid=str(d.get('delete_id',''));keep=str(d.get('keep_id',''))
+    groups=_reconcile_groups(u);found=None
+    for ts in groups.values():
+        ids={x['id'] for x in ts}
+        if len(ts)>1 and tid in ids and keep in ids and tid!=keep:found={x['id']:x for x in ts};break
+    if not found:return jsonify(error='Both tasks must be duplicates in your company'),409
+    t=found[tid];k=found[keep]
+    for table,col in [('tasks','depends_on'),('checklist','task_id'),('attachments','task_id')]:
+        if int(val(first('SELECT COUNT(*) AS n FROM '+table+' WHERE '+col+'=?',tid),'n',0) or 0):return jsonify(error='This task has linked records and cannot be deleted safely. Retain it for manual review.'),409
+    meaningful=['status','priority','start_date','due_date','notes','assignee','estimated_hours','actual_hours','phase_id','depends_on','tags','progress','duration_days','recurring']
+    if any(str(t.get(f) or '')!=str(k.get(f) or '') for f in meaningful):return jsonify(error='Task fields differ; refusing automatic deletion to avoid losing information.'),409
+    if t.get('external_import_id'):return jsonify(error='Task has a stable import ID and cannot be removed through this cleanup.'),409
+    q('DELETE FROM tasks WHERE id=? AND owner_id=?',tid,t['owner_id'])
+    return jsonify(deleted=tid,retained=keep)
+
+@app.post('/api/task-reconcile/preview')
+def task_reconcile_preview():
+    u,e=require_user(True)
+    if e:return e
+    f=request.files.get('file')
+    if not f:return jsonify(error='Choose an XLSX file'),400
+    try:raw=_xlsx_rows(f.read())
+    except Exception:return jsonify(error='Unable to read XLSX'),400
+    if len(raw)>2000:return jsonify(error='Maximum 2000 rows'),400
+    groups=_reconcile_groups(u);external={}
+    for ts in groups.values():
+        for t in ts:
+            if t.get('external_import_id'):external.setdefault(str(t['external_import_id']),[]).append(t)
+    out=[];seen=set()
+    for i,r in enumerate(raw,2):
+        code=str(r.get('Project Code','')).strip();name=str(r.get('Task Name','')).strip();eid=str(r.get('Task ID') or r.get('External Task ID') or '').strip();label=str(r.get('Depends On','')).strip()
+        key=_import_task_key(code,name);matches=external.get(eid,[]) if eid else groups.get(key,[])
+        errors=[]
+        if not name or not code:errors.append('Project Code and Task Name required')
+        if eid and len(matches)==0:errors.append('External Task ID not found; no task will be created')
+        if len(matches)==0:errors.append('Existing task not found')
+        if len(matches)>1:errors.append('Choose the exact existing task')
+        if key in seen:errors.append('Repeated task row in spreadsheet')
+        seen.add(key)
+        depkey=_import_dep_key(label,code)
+        preds=groups.get(depkey,[]) if depkey else []
+        if label and not preds:errors.append('Predecessor not found')
+        if label and len(preds)>1:errors.append('Choose the exact predecessor')
+        out.append({'row':i,'project_code':code,'name':name,'external_import_id':eid,'depends_on_label':label,'target_id':matches[0]['id'] if len(matches)==1 else '', 'predecessor_id':preds[0]['id'] if len(preds)==1 else '', 'target_options':[{'id':t['id'],'status':t.get('status'),'due_date':t.get('due_date'),'created_at':t.get('created_at')} for t in matches], 'predecessor_options':[{'id':t['id'],'status':t.get('status'),'due_date':t.get('due_date'),'created_at':t.get('created_at')} for t in preds], 'errors':errors})
+    return jsonify(rows=out,dependency_count=sum(bool(x['depends_on_label']) for x in out),ambiguous=sum(bool(x['errors']) for x in out))
+
+@app.post('/api/task-reconcile/commit')
+def task_reconcile_commit():
+    u,e=require_user(True)
+    if e:return e
+    d=body();items=d.get('rows') or []
+    if not items or len(items)>2000:return jsonify(error='Invalid batch'),400
+    groups=_reconcile_groups(u);alltasks={t['id']:t for ts in groups.values() for t in ts}
+    changes={};external_updates={};seen=set()
+    for x in items:
+        key=_import_task_key(x.get('project_code'),x.get('name'));target=str(x.get('target_id') or '');dep=str(x.get('predecessor_id') or '');label=str(x.get('depends_on_label') or '').strip();eid=str(x.get('external_import_id') or '').strip()
+        if key in seen:return jsonify(error='Duplicate spreadsheet row'),409
+        seen.add(key)
+        if target not in {t['id'] for t in groups.get(key,[])}:return jsonify(error='Target no longer matches spreadsheet: '+str(x.get('name'))),409
+        if label:
+            dk=_import_dep_key(label,x.get('project_code'))
+            if dep not in {t['id'] for t in groups.get(dk,[])}:return jsonify(error='Predecessor selection invalid: '+label),409
+            if dep==target:return jsonify(error='Self dependency detected'),409
+        else:dep=None
+        if eid:
+            for t in alltasks.values():
+                if t.get('external_import_id')==eid and t['id']!=target:return jsonify(error='External Task ID already assigned to a different task'),409
+            if eid in external_updates and external_updates[eid]!=target:return jsonify(error='Duplicate external Task ID in spreadsheet'),409
+            external_updates[eid]=target
+        changes[target]=dep
+    graph={tid:(changes[tid] if tid in changes else t.get('depends_on')) for tid,t in alltasks.items()}
+    for tid in changes:
+        seen_ids=set();cur=tid
+        while cur:
+            if cur in seen_ids:return jsonify(error='Circular dependency detected; no updates applied'),409
+            seen_ids.add(cur);cur=graph.get(cur)
+    # D1 batch: atomic all-or-nothing, including stable external IDs.
+    stmts=[]
+    for x in items:
+        tid=str(x['target_id']);dep=changes[tid];eid=str(x.get('external_import_id') or '').strip()
+        if eid:stmts.append(env().DB.prepare('UPDATE tasks SET depends_on=?,external_import_id=? WHERE id=? AND owner_id=?').bind(dep,eid,tid,alltasks[tid]['owner_id']))
+        else:stmts.append(env().DB.prepare('UPDATE tasks SET depends_on=? WHERE id=? AND owner_id=?').bind(dep,tid,alltasks[tid]['owner_id']))
+    run_sync(env().DB.batch(stmts))
+    return jsonify(updated=len(items),dependencies=sum(bool(v) for v in changes.values()),created=0,deleted=0)
+
 @app.post('/api/import-xlsx/preview')
 def import_xlsx_preview():
     u,e=require_user(True)
