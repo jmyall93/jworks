@@ -916,3 +916,56 @@ function jw142RenderFileLinks(){document.querySelectorAll('[data-jw142-report]')
 async function jw142Download(id){try{const r=await api('field-report-files/'+id);const binary=atob(r.data);const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));const url=URL.createObjectURL(new Blob([bytes],{type:r.mime}));const a=document.createElement('a');a.href=url;a.download=r.name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),15000)}catch(e){toast('Unable to download attachment')}}
 const jw142ProjectDetailBase=projectDetail;
 projectDetail=function(){jw142ProjectDetailBase();const p=P(projectId);if(!p)return;const main=$('main');main.classList.add('jw142-detail');const head=main.querySelector('.top');if(head){head.classList.add('jw142-projecthero');const actions=head.querySelector('.actions');if(actions){const buttons=[...actions.querySelectorAll('button')];const keep=['← Projects','+ Task','Reports','Ask JWorks'];const hidden=[];for(const b of buttons){const name=b.textContent.trim();if(!keep.includes(name)){hidden.push({label:name,action:b.getAttribute('onclick')});b.remove()}}const more=document.createElement('details');more.className='jw142-actionmore';more.innerHTML='<summary class="btn">More actions ▾</summary><div class="jw142-actionmenu"></div>';const box=more.querySelector('div');hidden.forEach(x=>{const b=document.createElement('button');b.textContent=x.label;b.setAttribute('onclick',x.action||'');box.appendChild(b)});actions.appendChild(more);actions.classList.add('jw142-topactions')}}const strip=main.querySelector('.v13-project-strip');if(strip)strip.classList.add('jw142-metrics');const nav=main.querySelector('.v13-project-nav');if(nav){const primary=['board','tasks','phases','milestones','files','field reports'];const buttons=[...nav.children].filter(x=>x.tagName==='BUTTON');const overflow=document.createElement('details');overflow.className='jw142-navmore';overflow.innerHTML='<summary>More ▾</summary><div class="jw142-navmenu"></div>';const menu=overflow.querySelector('div');for(const b of buttons){if(!primary.includes(b.textContent.trim().toLowerCase())){menu.appendChild(b)}}const old=nav.querySelector('details');if(old){for(const b of [...old.querySelectorAll('button')])menu.appendChild(b);old.remove()}nav.appendChild(overflow);nav.classList.add('jw142-one-line')}const pane=$('projectPane');if(pane){pane.querySelectorAll('.taskcard').forEach(el=>{const label=el.querySelector('strong')?.textContent;const task=S.tasks.find(t=>t.project_id===p.id&&t.name===label);if(task)el.classList.add('jw142-tone-'+jw142TaskTone(task))});if(tab==='fieldreports'){const entries=[...pane.querySelectorAll('.jw14-reportentry,.phase')];const reports=S.field_reports.filter(x=>x.project_id===p.id);entries.forEach((el,i)=>{if(reports[i]&&!el.querySelector('[data-jw142-report]'))el.insertAdjacentHTML('beforeend',`<div data-jw142-report="${reports[i].id}"></div>`)});jw142RenderFileLinks();jw142LoadReportFiles()}}};
+
+// JWorks v14.3.1 corrective release: real project toolbar, unified editing, five mobile destinations.
+(function(){
+  // This wrapper is installed in app.js after all previous projectDetail definitions,
+  // ensuring it executes on every project render rather than being overwritten by app startup.
+  const previousProjectDetail=projectDetail;
+  projectDetail=function(){
+    previousProjectDetail();
+    const project=typeof P==='function'?P(projectId):null;
+    const root=document.getElementById('main');
+    if(!project||!root)return;
+    const hero=root.querySelector('.jw142-projecthero');
+    const actions=hero?.querySelector('.jw142-topactions');
+    if(!hero||!actions)return;
+    root.classList.add('jw143-detail');
+    const more=actions.querySelector('.jw142-actionmore');
+    const all=[...actions.querySelectorAll(':scope > button'),...(more?[...more.querySelectorAll('.jw142-actionmenu button')]:[])];
+    const matching=(pattern)=>all.find(b=>pattern.test(b.textContent.trim()));
+    const originalBack=matching(/^←\s*projects$/i);
+    const originalAdd=matching(/^\+\s*task$/i);
+    const originalReports=matching(/^reports$/i);
+    const originalAsk=matching(/ask jworks/i);
+    if(!hero.previousElementSibling?.classList.contains('jw143-breadcrumb')){
+      const back=document.createElement('button');back.type='button';back.className='jw143-breadcrumb';back.textContent='← All projects';
+      back.onclick=()=>{projectId=null;render()};hero.parentNode.insertBefore(back,hero);
+    }
+    actions.replaceChildren();actions.classList.add('jw143-quickactions');
+    const action=(label,callback,primary=false)=>{const b=document.createElement('button');b.type='button';b.className='btn'+(primary?' primary':'');b.textContent=label;b.onclick=callback;actions.appendChild(b);return b};
+    if(originalAdd){originalAdd.classList.add('primary');actions.appendChild(originalAdd)}else action('+ Task',()=>taskModal(null,project.id),true);
+    if(originalReports)actions.appendChild(originalReports);else action('Reports',()=>jw14ReportHub(project.id));
+    action('Schedule',()=>{tab='plan';render()});
+    action('Edit',()=>projectModal(project.id));
+    const overflow=document.createElement('details');overflow.className='jw142-actionmore jw143-actions';
+    const summary=document.createElement('summary');summary.className='btn';summary.textContent='⋯';summary.title='Additional project options';summary.setAttribute('aria-label','Additional project options');
+    const menu=document.createElement('div');menu.className='jw142-actionmenu';
+    overflow.append(summary,menu);
+    const skip=/^(←\s*projects|\+\s*task|reports|edit project|project settings|project gantt|critical path|what-if|save report snapshot|status report|report builder)$/i;
+    const seen=new Set();
+    for(const b of all){const label=b.textContent.trim();if(skip.test(label)||/ask jworks/i.test(label)||seen.has(label.toLowerCase()))continue;seen.add(label.toLowerCase());b.className='';menu.appendChild(b)}
+    if(originalAsk){originalAsk.className='';menu.appendChild(originalAsk)}
+    if(menu.children.length)actions.appendChild(overflow);
+    const nav=root.querySelector('.jw142-one-line');if(nav)nav.classList.add('jw143-project-nav');
+  };
+  const previousProjectModal=projectModal;
+  projectModal=function(id){previousProjectModal(id);if(!id)return;
+    const title=document.getElementById('modalTitle');if(title&&/project settings/i.test(title.textContent))title.textContent='Edit project';
+  };
+  const mobile=document.getElementById('mobileNav');
+  if(mobile){
+    const destinations=[['dashboard','⌂','Home'],['projects','▣','Projects'],['today','✓','My Work'],['inbox','▤','Notes'],['mobilemore','☰','More']];
+    mobile.innerHTML=destinations.map(([route,icon,label])=>'<button type="button" data-mobile-page="'+route+'" aria-label="'+label+'">'+icon+'<span>'+label+'</span></button>').join('');
+  }
+})();
