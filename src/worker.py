@@ -1133,6 +1133,14 @@ def support_tickets_get():
     if e:return e
     return jsonify(tickets=rows('SELECT id,ticket_number,subject,category,priority,status,created_at FROM support_tickets WHERE company_id=? ORDER BY created_at DESC LIMIT 100',user_company(u)))
 
+@app.get('/api/support-tickets/<ticket_id>')
+def support_ticket_detail_get(ticket_id):
+    u,e=require_user()
+    if e:return e
+    ticket=first('SELECT id,ticket_number,subject,category,priority,status,description,created_at,updated_at FROM support_tickets WHERE id=? AND company_id=?',ticket_id,user_company(u))
+    if not ticket:return jsonify(error='Ticket not found'),404
+    return jsonify(ticket={k:val(ticket,k,'') for k in ['id','ticket_number','subject','category','priority','status','description','created_at','updated_at']})
+
 @app.post('/api/support-tickets')
 def support_tickets_post():
     u,e=require_user(True)
