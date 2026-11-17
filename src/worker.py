@@ -1254,3 +1254,42 @@ def demo_workspace_clear_v122():
     _clear_demo(user_company(u),str(val(u,'id','')));return jsonify(ok=True)
 
 Default=wsgi.entrypoint(app)
+
+
+# v14.2 field report attachments: small files stored in D1 as base64 text.
+# Limits prevent unbounded database growth; future releases can migrate to R2.
+@app.get('/api/field-report-files')
+def jw142_files_list():
+    u,e=require_user(True)
+    if e:return e
+    return jsonify(files=rows('SELECT f.id,f.report_id,f.name,f.mime,f.size,f.created_at FROM field_report_files f JOIN field_reports r ON r.id=f.report_id WHERE r.owner_id=? ORDER BY f.created_at DESC',str(u.id)))
+
+@app.post('/api/field-report-files')
+def jw142_files_create():
+    import base64
+    u,e=require_user(True)
+    if e:return e
+    d=body(); rid=str(d.get('report_id',''))
+    report=first('SELECT id,project_id FROM field_reports WHERE id=? AND owner_id=?',rid,str(u.id))
+    if not report:return jsonify(error='Report not found'),404
+    name=str(d.get('name',''))[:180].strip();mime=str(d.get('mime',''))
+    if not name or mime not in ('image/jpeg','image/png','image/webp','application/pdf','text/plain'):return jsonify(error='Unsupported file type'),400
+    raw=str(d.get('data',''))
+    if len(raw)>1400000:return jsonify(error='File exceeds 1 MB'),413
+    try: decoded=base64.b64decode(raw,validate=True)
+    except Exception:return jsonify(error='Invalid file data'),400
+    if not decoded or len(decoded)>1048576:return jsonify(error='File exceeds 1 MB'),413
+    signatures={'image/jpeg':decoded.startswith(b'\xff\xd8\xff'),'image/png':decoded.startswith(b'\x89PNG\r\n\x1a\n'),'image/webp':decoded.startswith(b'RIFF') and decoded[8:12]==b'WEBP','application/pdf':decoded.startswith(b'%PDF-'),'text/plain':b'\x00' not in decoded}
+    if not signatures[mime]:return jsonify(error='File content does not match type'),400
+    n=first('SELECT COUNT(*) AS n FROM field_report_files WHERE report_id=?',rid)
+    if int(val(n,'n',0) or 0)>=5:return jsonify(error='Maximum 5 files per report'),409
+    fid=uid();q('INSERT INTO field_report_files(id,report_id,owner_id,name,mime,size,data,created_at) VALUES(?,?,?,?,?,?,?,?)',fid,rid,str(u.id),name,mime,len(decoded),raw,now())
+    return jsonify(id=fid)
+
+@app.get('/api/field-report-files/<fid>')
+def jw142_files_download(fid):
+    u,e=require_user(True)
+    if e:return e
+    f=first('SELECT f.name,f.mime,f.data FROM field_report_files f JOIN field_reports r ON r.id=f.report_id WHERE f.id=? AND r.owner_id=?',fid,str(u.id))
+    if not f:return jsonify(error='Attachment not found'),404
+    return jsonify(name=val(f,'name'),mime=val(f,'mime'),data=val(f,'data'))
